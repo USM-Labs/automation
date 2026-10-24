@@ -12,13 +12,22 @@ variable, then from DEFAULT_API_KEY. The base URL is taken from --base-url,
 then from API_BASE_URL, then from DEFAULT_BASE_URL.
 
 Results are saved to <script dir>/data/{FROM}_{TO}_{YYYY-MM-DD}.json.
+Errors are printed to stderr and appended to <script dir>/error.log.
+
+Exit codes:
+    0 - rate received and saved
+    2 - invalid arguments (currency code, date format, date range, timeout)
+    3 - API error (error field, HTTP status, non-JSON or malformed response)
+    4 - network error (connection refused, timeout, other transport failure)
+    5 - the result file cannot be written
 """
 
 import argparse
 import json
+import logging
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,11 +42,30 @@ REQUEST_TIMEOUT_SECONDS = 10
 ENV_API_KEY = "API_KEY"
 ENV_BASE_URL = "API_BASE_URL"
 
+MIN_DATE = date(2025, 1, 1)
+MAX_DATE = date(2025, 9, 15)
+DATE_FORMAT = "%Y-%m-%d"
+CURRENCY_CODE_LENGTH = 3
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / "data"
+ERROR_LOG_PATH = SCRIPT_DIR / "error.log"
+
+LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 
 EXIT_OK = 0
+EXIT_INVALID_ARGS = 2
 EXIT_API_ERROR = 3
+EXIT_NETWORK_ERROR = 4
+EXIT_IO_ERROR = 5
+
+
+class ExchangeRateError(Exception):
+    """Signals an expected failure; exit_code is the process status to return."""
+
+    def __init__(self, message: str, exit_code: int) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -56,7 +84,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--to", dest="to_currency", required=True,
                         metavar="CODE", help="target currency, e.g. MDL")
     parser.add_argument("--date", dest="date", required=True,
-                        metavar="YYYY-MM-DD", help="date of the rate")
+                        metavar="YYYY-MM-DD",
+                        help=f"date between {MIN_DATE} and {MAX_DATE}")
     parser.add_argument("--api-key", dest="api_key", default=None,
                         metavar="KEY",
                         help=f"API key (default: ${ENV_API_KEY} or {DEFAULT_API_KEY})")
@@ -67,6 +96,66 @@ def parse_arguments() -> argparse.Namespace:
                         default=REQUEST_TIMEOUT_SECONDS, metavar="SEC",
                         help=f"request timeout in seconds (default: {REQUEST_TIMEOUT_SECONDS})")
     return parser.parse_args()
+
+
+def validate_currency_code(code: str) -> str:
+    """Validates a currency code and normalizes it to upper case.
+
+    Returns:
+        The code in upper case, e.g. "usd" -> "USD".
+    Raises:
+        ExchangeRateError (EXIT_INVALID_ARGS): not exactly 3 ASCII letters.
+    """
+    normalized = code.strip().upper()
+    if (len(normalized) != CURRENCY_CODE_LENGTH
+            or not normalized.isascii()
+            or not normalized.isalpha()):
+        raise ExchangeRateError(
+            f"invalid currency code '{code}': expected {CURRENCY_CODE_LENGTH} latin letters",
+            EXIT_INVALID_ARGS,
+        )
+    return normalized
+
+
+def validate_date(value: str) -> date:
+    """Validates a YYYY-MM-DD string against the calendar and the data range.
+
+    Returns:
+        The parsed date.
+    Raises:
+        ExchangeRateError (EXIT_INVALID_ARGS): unparseable date or a date
+        outside MIN_DATE..MAX_DATE.
+    """
+    try:
+        parsed = datetime.strptime(value.strip(), DATE_FORMAT).date()
+    except ValueError:
+        raise ExchangeRateError(
+            f"invalid date '{value}': expected an existing date in YYYY-MM-DD format",
+            EXIT_INVALID_ARGS,
+        ) from None
+    # The service silently returns the last known rate for dates out of range.
+    if not MIN_DATE <= parsed <= MAX_DATE:
+        raise ExchangeRateError(
+            f"date {parsed} is outside the supported range {MIN_DATE}..{MAX_DATE}",
+            EXIT_INVALID_ARGS,
+        )
+    return parsed
+
+
+def validate_timeout(seconds: float) -> float:
+    """Validates the request timeout.
+
+    Returns:
+        The timeout unchanged.
+    Raises:
+        ExchangeRateError (EXIT_INVALID_ARGS): zero or negative value.
+    """
+    if not seconds > 0:
+        raise ExchangeRateError(
+            f"invalid timeout {seconds}: expected a positive number of seconds",
+            EXIT_INVALID_ARGS,
+        )
+    return seconds
 
 
 def resolve_api_key(cli_value: Optional[str]) -> str:
@@ -89,35 +178,78 @@ def resolve_base_url(cli_value: Optional[str]) -> str:
 
 
 def build_source_url(base_url: str, from_currency: str, to_currency: str,
-                     on_date: str) -> str:
+                     on_date: date) -> str:
     """Returns the request URL with from/to/date in the query string.
 
     The API key is deliberately absent: it is sent in the POST body.
     """
-    return f"{base_url}/?from={from_currency}&to={to_currency}&date={on_date}"
+    return (f"{base_url}/?from={from_currency}&to={to_currency}"
+            f"&date={on_date.strftime(DATE_FORMAT)}")
 
 
 def fetch_exchange_rate(base_url: str, api_key: str, from_currency: str,
-                        to_currency: str, on_date: str,
+                        to_currency: str, on_date: date,
                         timeout: float = REQUEST_TIMEOUT_SECONDS) -> dict[str, Any]:
-    """Sends the POST request.
+    """Sends the POST request and checks the response.
 
     Returns:
         The "data" object of the response (from, to, rate, date).
+    Raises:
+        ExchangeRateError (EXIT_NETWORK_ERROR): connection or timeout failure.
+        ExchangeRateError (EXIT_API_ERROR): bad HTTP status, non-JSON body,
+        non-empty "error" field, missing "data" or "rate".
     """
     url = build_source_url(base_url, from_currency, to_currency, on_date)
-    response = requests.post(url, data={"key": api_key}, timeout=timeout)
-    body = response.json()
-    if body.get("error"):
-        print(f"{SCRIPT_NAME}: error: API returned an error: {body['error']}",
-              file=sys.stderr)
-        sys.exit(EXIT_API_ERROR)
-    return body["data"]
+    try:
+        response = requests.post(url, data={"key": api_key}, timeout=timeout)
+    except requests.exceptions.Timeout:
+        raise ExchangeRateError(
+            f"request to {base_url} timed out after {timeout:g} s",
+            EXIT_NETWORK_ERROR,
+        ) from None
+    except requests.exceptions.ConnectionError as exc:
+        reason = "connection refused" if "refused" in str(exc).lower() else "connection failed"
+        raise ExchangeRateError(
+            f"cannot connect to {base_url} ({reason})", EXIT_NETWORK_ERROR,
+        ) from None
+    except requests.exceptions.RequestException as exc:
+        raise ExchangeRateError(
+            f"request to {base_url} failed: {exc.__class__.__name__}",
+            EXIT_NETWORK_ERROR,
+        ) from None
+
+    if response.status_code != 200:
+        raise ExchangeRateError(
+            f"unexpected HTTP status {response.status_code} from {base_url}",
+            EXIT_API_ERROR,
+        )
+
+    try:
+        body = response.json()
+    except ValueError:
+        # e.g. the PHP fatal error page returned with HTTP 200
+        raise ExchangeRateError("response is not valid JSON", EXIT_API_ERROR) from None
+
+    if not isinstance(body, dict):
+        raise ExchangeRateError("response is not a JSON object", EXIT_API_ERROR)
+
+    api_error = body.get("error")
+    if api_error:
+        raise ExchangeRateError(f"API returned an error: {api_error}", EXIT_API_ERROR)
+
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ExchangeRateError("response has no 'data' object", EXIT_API_ERROR)
+
+    if not isinstance(data.get("rate"), (int, float)):
+        raise ExchangeRateError("response 'data' has no numeric 'rate'", EXIT_API_ERROR)
+    return data
 
 
-def build_output_path(from_currency: str, to_currency: str, on_date: str) -> Path:
+def build_output_path(from_currency: str, to_currency: str, on_date: date) -> Path:
     """Returns the output file path: DATA_DIR/{FROM}_{TO}_{YYYY-MM-DD}.json."""
-    return DATA_DIR / f"{from_currency}_{to_currency}_{on_date}.json"
+    file_name = f"{from_currency}_{to_currency}_{on_date.strftime(DATE_FORMAT)}.json"
+    return DATA_DIR / file_name
 
 
 def save_result(payload: dict[str, Any], path: Path) -> None:
@@ -133,32 +265,64 @@ def save_result(payload: dict[str, Any], path: Path) -> None:
         output_file.write("\n")
 
 
+def configure_logging() -> logging.Logger:
+    """Configures the module logger.
+
+    Returns:
+        A logger whose only handler appends ERROR records to ERROR_LOG_PATH.
+    """
+    logger = logging.getLogger(SCRIPT_NAME)
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
+    if not logger.handlers:
+        # delay=True: error.log is created only when the first error happens
+        handler = logging.FileHandler(ERROR_LOG_PATH, mode="a", encoding="utf-8", delay=True)
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        logger.addHandler(handler)
+    return logger
+
+
 def main() -> int:
-    """Entry point: request the rate and save it.
+    """Entry point: validate, request, save, report.
 
     Returns:
         One of the EXIT_* codes.
     """
     args = parse_arguments()
-    from_currency = args.from_currency.upper()
-    to_currency = args.to_currency.upper()
-    on_date = args.date
+    logger = configure_logging()
+    request_label = f"{args.from_currency}->{args.to_currency} on {args.date}"
 
-    api_key = resolve_api_key(args.api_key)
-    base_url = resolve_base_url(args.base_url)
-    data = fetch_exchange_rate(base_url, api_key, from_currency,
-                               to_currency, on_date, args.timeout)
+    try:
+        from_currency = validate_currency_code(args.from_currency)
+        to_currency = validate_currency_code(args.to_currency)
+        on_date = validate_date(args.date)
+        timeout = validate_timeout(args.timeout)
+        request_label = f"{from_currency}->{to_currency} on {on_date}"
 
-    payload: dict[str, Any] = {
-        "from": from_currency,
-        "to": to_currency,
-        "date": on_date,
-        "rate": data["rate"],
-        "source": build_source_url(base_url, from_currency, to_currency, on_date),
-        "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-    }
-    output_path = build_output_path(from_currency, to_currency, on_date)
-    save_result(payload, output_path)
+        api_key = resolve_api_key(args.api_key)
+        base_url = resolve_base_url(args.base_url)
+        data = fetch_exchange_rate(base_url, api_key, from_currency,
+                                   to_currency, on_date, timeout)
+
+        payload: dict[str, Any] = {
+            "from": from_currency,
+            "to": to_currency,
+            "date": on_date.strftime(DATE_FORMAT),
+            "rate": data["rate"],
+            "source": build_source_url(base_url, from_currency, to_currency, on_date),
+            "retrieved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        output_path = build_output_path(from_currency, to_currency, on_date)
+        try:
+            save_result(payload, output_path)
+        except OSError as exc:
+            raise ExchangeRateError(
+                f"cannot write {output_path}: {exc.strerror}", EXIT_IO_ERROR,
+            ) from None
+    except ExchangeRateError as exc:
+        print(f"{SCRIPT_NAME}: error: {exc}", file=sys.stderr)
+        logger.error("%s: %s", request_label, exc)
+        return exc.exit_code
 
     print(f"{from_currency}/{to_currency} on {on_date}: {payload['rate']}")
     print(f"saved: {os.path.relpath(output_path)}")
