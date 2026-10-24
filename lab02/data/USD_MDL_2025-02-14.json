@@ -1,0 +1,8 @@
+{
+    "from": "USD",
+    "to": "MDL",
+    "date": "2025-02-14",
+    "rate": 0.05346106964908153,
+    "source": "http://localhost:8080/?from=USD&to=MDL&date=2025-02-14",
+    "retrieved_at": "2026-10-24T19:37:48+03:00"
+}

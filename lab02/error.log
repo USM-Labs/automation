@@ -1,0 +1,6 @@
+2026-10-24 19:50:14,503 | ERROR    | GBP->MDL on 2025-01-15: API returned an error: The currency GBP is unknown
+2026-10-24 19:50:41,219 | ERROR    | RUS->MDL on 2025-01-15: API returned an error: Unknown currency rus
+2026-10-24 19:51:08,872 | ERROR    | USD->MDL on 2025-01-15: API returned an error: Invalid API key
+2026-10-24 19:51:36,140 | ERROR    | USD->MDL on 2025-01-15: cannot connect to http://localhost:9999 (connection refused)
+2026-10-24 19:52:02,655 | ERROR    | USD->MDL on 2025-02-30: invalid date '2025-02-30': expected an existing date in YYYY-MM-DD format
+2026-10-24 19:52:24,391 | ERROR    | USD->MDL on 2024-12-31: date 2024-12-31 is outside the supported range 2025-01-01..2025-09-15
