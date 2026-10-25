@@ -6,6 +6,9 @@ lab02prep Web API and save it as JSON.
 Usage:
     python3 currency_exchange_rate.py --from USD --to MDL --date 2025-01-15
         [--api-key KEY] [--base-url URL] [--timeout SEC]
+        [--days N]
+
+    --days N  количество дней подряд, начиная с --date (по умолчанию 1)
 
 The API key is taken from --api-key, then from the API_KEY environment
 variable, then from DEFAULT_API_KEY. The base URL is taken from --base-url,
@@ -20,6 +23,9 @@ Exit codes:
     3 - API error (error field, HTTP status, non-JSON or malformed response)
     4 - network error (connection refused, timeout, other transport failure)
     5 - the result file cannot be written
+
+При --days N > 1 каждый день обрабатывается отдельно, а итоговый код
+возврата равен максимальному коду по всем дням (0 только при полном успехе).
 """
 
 import argparse
@@ -27,7 +33,7 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,6 +52,11 @@ MIN_DATE = date(2025, 1, 1)
 MAX_DATE = date(2025, 9, 15)
 DATE_FORMAT = "%Y-%m-%d"
 CURRENCY_CODE_LENGTH = 3
+
+# Допустимое количество дней для --days и значение по умолчанию.
+MIN_DAYS = 1
+MAX_DAYS = 31
+DEFAULT_DAYS = 1
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / "data"
@@ -95,6 +106,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--timeout", dest="timeout", type=float,
                         default=REQUEST_TIMEOUT_SECONDS, metavar="SEC",
                         help=f"request timeout in seconds (default: {REQUEST_TIMEOUT_SECONDS})")
+    # Новый параметр: количество дней подряд, начиная с --date.
+    parser.add_argument("--days", dest="days", type=int, default=DEFAULT_DAYS,
+                        metavar="N",
+                        help=(f"количество дней подряд, начиная с --date, "
+                              f"от {MIN_DAYS} до {MAX_DAYS} (по умолчанию: {DEFAULT_DAYS})"))
     return parser.parse_args()
 
 
@@ -140,6 +156,40 @@ def validate_date(value: str) -> date:
             EXIT_INVALID_ARGS,
         )
     return parsed
+
+
+def parse_start_date(value: str) -> date:
+    """Проверяет только формат начальной даты YYYY-MM-DD (без проверки диапазона).
+
+    Returns:
+        Разобранная дата.
+    Raises:
+        ExchangeRateError (EXIT_INVALID_ARGS): строка не является датой
+        в формате YYYY-MM-DD.
+    """
+    try:
+        return datetime.strptime(value.strip(), DATE_FORMAT).date()
+    except ValueError:
+        raise ExchangeRateError(
+            f"invalid date '{value}': expected an existing date in YYYY-MM-DD format",
+            EXIT_INVALID_ARGS,
+        ) from None
+
+
+def validate_days(value: int) -> int:
+    """Проверяет количество дней для --days.
+
+    Returns:
+        Значение без изменений.
+    Raises:
+        ExchangeRateError (EXIT_INVALID_ARGS): значение вне MIN_DAYS..MAX_DAYS.
+    """
+    if not MIN_DAYS <= value <= MAX_DAYS:
+        raise ExchangeRateError(
+            f"invalid number of days {value}: expected {MIN_DAYS}..{MAX_DAYS}",
+            EXIT_INVALID_ARGS,
+        )
+    return value
 
 
 def validate_timeout(seconds: float) -> float:
@@ -282,25 +332,17 @@ def configure_logging() -> logging.Logger:
     return logger
 
 
-def main() -> int:
-    """Entry point: validate, request, save, report.
+def process_date(from_currency: str, to_currency: str, day: date,
+                 api_key: str, base_url: str, timeout: float,
+                 logger: logging.Logger) -> int:
+    """Обрабатывает один день: проверка диапазона, запрос, сохранение, вывод.
 
     Returns:
-        One of the EXIT_* codes.
+        Один из кодов EXIT_*; ошибка выводится в stderr и в error.log.
     """
-    args = parse_arguments()
-    logger = configure_logging()
-    request_label = f"{args.from_currency}->{args.to_currency} on {args.date}"
-
+    request_label = f"{from_currency}->{to_currency} on {day}"
     try:
-        from_currency = validate_currency_code(args.from_currency)
-        to_currency = validate_currency_code(args.to_currency)
-        on_date = validate_date(args.date)
-        timeout = validate_timeout(args.timeout)
-        request_label = f"{from_currency}->{to_currency} on {on_date}"
-
-        api_key = resolve_api_key(args.api_key)
-        base_url = resolve_base_url(args.base_url)
+        on_date = validate_date(day.strftime(DATE_FORMAT))
         data = fetch_exchange_rate(base_url, api_key, from_currency,
                                    to_currency, on_date, timeout)
 
@@ -320,13 +362,49 @@ def main() -> int:
                 f"cannot write {output_path}: {exc.strerror}", EXIT_IO_ERROR,
             ) from None
     except ExchangeRateError as exc:
-        print(f"{SCRIPT_NAME}: error: {exc}", file=sys.stderr)
+        # flush=True сохраняет порядок строк stdout и stderr при выводе в файл журнала.
+        print(f"{SCRIPT_NAME}: error: {exc}", file=sys.stderr, flush=True)
         logger.error("%s: %s", request_label, exc)
         return exc.exit_code
 
     print(f"{from_currency}/{to_currency} on {on_date}: {payload['rate']}")
-    print(f"saved: {os.path.relpath(output_path)}")
+    print(f"saved: {os.path.relpath(output_path)}", flush=True)
     return EXIT_OK
+
+
+def main() -> int:
+    """Entry point: validate, request, save, report.
+
+    Returns:
+        One of the EXIT_* codes.
+    """
+    args = parse_arguments()
+    logger = configure_logging()
+    request_label = f"{args.from_currency}->{args.to_currency} on {args.date}"
+
+    # Общие параметры проверяются один раз, до обработки отдельных дней.
+    try:
+        from_currency = validate_currency_code(args.from_currency)
+        to_currency = validate_currency_code(args.to_currency)
+        start_date = parse_start_date(args.date)
+        timeout = validate_timeout(args.timeout)
+        days = validate_days(args.days)
+    except ExchangeRateError as exc:
+        print(f"{SCRIPT_NAME}: error: {exc}", file=sys.stderr)
+        logger.error("%s: %s", request_label, exc)
+        return exc.exit_code
+
+    api_key = resolve_api_key(args.api_key)
+    base_url = resolve_base_url(args.base_url)
+
+    # Каждый день диапазона обрабатывается отдельно; итоговый код возврата — максимальный.
+    exit_code = EXIT_OK
+    for offset in range(days):
+        day = start_date + timedelta(days=offset)
+        day_code = process_date(from_currency, to_currency, day,
+                                api_key, base_url, timeout, logger)
+        exit_code = max(exit_code, day_code)
+    return exit_code
 
 
 if __name__ == "__main__":
