@@ -1,0 +1,13 @@
+# Расписание запуска currency_exchange_rate.py в контейнере lab03.
+# Устанавливается как /etc/cron.d/lab03: системный формат, поле user обязательно.
+# m h dom mon dow user command
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# Каждый день в 06:00 запрашивается пара MDL -> EUR на вчерашнюю дату.
+# В формате даты % записан как \%, так как неэкранированный % cron считает переводом строки.
+0 6 * * * root python3 /opt/lab03/currency_exchange_rate.py --from MDL --to EUR --date "$(date --date='yesterday' '+\%Y-\%m-\%d')" >> /var/log/cron.log 2>&1
+
+# Каждую пятницу в 17:00 запрашивается пара MDL -> USD за 7 дней подряд (с пятницы по четверг).
+# Начальная дата = 7 дней назад; \% экранирован по той же причине.
+0 17 * * 5 root python3 /opt/lab03/currency_exchange_rate.py --from MDL --to USD --date "$(date --date='7 days ago' '+\%Y-\%m-\%d')" --days 7 >> /var/log/cron.log 2>&1
