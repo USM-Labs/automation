@@ -1,0 +1,8 @@
+# Файлы, которые не нужны при сборке образа
+__pycache__/
+*.pyc
+data/
+error.log
+readme.md
+docker-compose.yml
+.dockerignore

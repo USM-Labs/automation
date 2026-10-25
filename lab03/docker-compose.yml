@@ -1,0 +1,26 @@
+# Описание сервиса с cron для лабораторной работы 3.
+services:
+  # Контейнер, выполняющий задания cron для currency_exchange_rate.py.
+  currency-cron:
+    # Сборка образа из Dockerfile в текущей директории.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Имя и версия собираемого образа.
+    image: lab03-currency-cron:1.0
+    # Фиксированное имя контейнера.
+    container_name: lab03-currency-cron
+    # Перезапуск контейнера, если он не был остановлен вручную.
+    restart: unless-stopped
+    # Переменные окружения, которые читает скрипт.
+    environment:
+      # Адрес сервиса lab02prep по сетевому псевдониму web.
+      API_BASE_URL: "http://web"
+      # Тестовый ключ локального сервиса lab02prep.
+      API_KEY: "EXAMPLE_API_KEY"
+
+# Сеть по умолчанию заменена внешней сетью уже запущенного сервиса lab02prep.
+networks:
+  default:
+    name: lab02prep_default
+    external: true
