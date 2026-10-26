@@ -397,7 +397,7 @@ def main() -> int:
     api_key = resolve_api_key(args.api_key)
     base_url = resolve_base_url(args.base_url)
 
-    # Каждый день диапазона обрабатывается отдельно; итоговый код возврата — максимальный.
+    # Каждый день диапазона обрабатывается отдельно; итоговый код возврата равен максимальному.
     exit_code = EXIT_OK
     for offset in range(days):
         day = start_date + timedelta(days=offset)

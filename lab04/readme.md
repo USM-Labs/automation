@@ -87,7 +87,7 @@ lab04/
 
 ### 1.1 Библиотека isbn-tools
 
-`isbn-tools` — небольшая PHP-библиотека для проверки и преобразования номеров ISBN
+`isbn-tools`: небольшая PHP-библиотека для проверки и преобразования номеров ISBN
 (International Standard Book Number). Существуют два формата номера:
 
 1. **ISBN-10**: 9 цифр и контрольный символ. Сумма произведений цифр на веса 10, 9, ..., 1
@@ -114,7 +114,7 @@ lab04/
 | | `toIsbn13(): string` | номер в формате ISBN-13 |
 | | `toIsbn10(): ?string` | номер в формате ISBN-10 или `null` для префикса 979 |
 | | `equals(self $other): bool` | сравнение двух номеров |
-| `InvalidIsbnException` | — | наследник `\InvalidArgumentException` |
+| `InvalidIsbnException` | нет | наследник `\InvalidArgumentException` |
 
 Объект `Isbn` неизменяемый: конструктор закрытый, номер хранится в свойстве `readonly`
 в формате ISBN-13. Сообщения исключений:
@@ -547,7 +547,7 @@ Finished: SUCCESS
 
 | № | Проблема | Причина | Решение |
 |---|----------|---------|---------|
-| 1 | `composer install` в образе из задания (только `apt-get install -y php-cli`, Composer добавлен отдельно) завершается ошибкой: `phpunit/phpunit 11.5.57 requires ext-dom * -> it is missing from your system. Install or enable PHP's dom extension.`, для `sebastian/exporter 6.3.2` — `requires ext-mbstring *` | пакет `php-cli` в Debian не содержит расширений dom, xml, xmlwriter и mbstring, которые требует PHPUnit; в образе также нет `unzip` | в `Dockerfile` добавлены пакеты `php-xml`, `php-mbstring` и `unzip` |
+| 1 | `composer install` в образе из задания (только `apt-get install -y php-cli`, Composer добавлен отдельно) завершается ошибкой: `phpunit/phpunit 11.5.57 requires ext-dom * -> it is missing from your system. Install or enable PHP's dom extension.`, для `sebastian/exporter 6.3.2`: `requires ext-mbstring *` | пакет `php-cli` в Debian не содержит расширений dom, xml, xmlwriter и mbstring, которые требует PHPUnit; в образе также нет `unzip` | в `Dockerfile` добавлены пакеты `php-xml`, `php-mbstring` и `unzip` |
 | 2 | узел `ssh-agent1` не подключается, в журнале: `[SSH] No Known Hosts file was found at /var/jenkins_home/.ssh/known_hosts. Please ensure one is created at this path and that Jenkins can read it.` и `Key exchange was not finished, connection is closed.` | узел создан со стратегией Known hosts file до того, как в контроллере появился файл `known_hosts` | выполнена команда `ssh-keyscan` из раздела 4.2; при следующей попытке: `SSH host key matches key in Known Hosts file. Connection will be allowed.` |
 | 3 | после пересоздания контейнера `ssh-agent` узел отключился (`Connection was broken`), повторный запуск: `[SSH] The SSH key presented by the remote host does not match the key saved in the Known Hosts file against this host. Connections to this host will be denied until the two keys match.` | образ `jenkins/ssh-agent` генерирует новые ключи хоста при создании контейнера, старая запись в `known_hosts` больше не совпадает | удалена старая запись и добавлена новая: `docker exec jenkins-controller sh -c 'ssh-keygen -R ssh-agent -f ~/.ssh/known_hosts && ssh-keyscan -H ssh-agent >> ~/.ssh/known_hosts'`, после чего узел подключился (`Agent successfully connected and online`) |
 | 4 | `composer require --dev phpunit/phpunit:^12` в образе агента: `phpunit/phpunit[12.5.8, ..., 12.5.40] require php >=8.3 -> your php version (8.2.35) does not satisfy that requirement.` | в Debian 12 (bookworm) PHP 8.2, а PHPUnit 12 требует PHP 8.3 | в `composer.json` указан PHPUnit `^11.5` |

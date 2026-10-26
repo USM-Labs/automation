@@ -240,7 +240,7 @@ docker compose exec currency-cron sh -c "printf '%s\n' 'PATH=/usr/local/bin:/usr
 Строка `PATH=` обязательна: переменные файла `/etc/cron.d/lab03` действуют только в нём,
 а без неё cron использует `PATH=/usr/bin:/bin`, где нет `python3`.
 
-Через 1–2 минуты в журнале появляются строки, записанные самим cron:
+Через 1-2 минуты в журнале появляются строки, записанные самим cron:
 
 ```
 $ docker compose exec currency-cron tail -n 4 /var/log/cron.log
