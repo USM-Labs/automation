@@ -1,0 +1,30 @@
+{
+    "name": "splavski/isbn-tools",
+    "description": "Проверка и преобразование номеров ISBN-10 и ISBN-13",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Splavski Maxim"
+        }
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Splavski\\IsbnTools\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Splavski\\IsbnTools\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
