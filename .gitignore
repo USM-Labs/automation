@@ -2,3 +2,8 @@
 __pycache__/
 .venv/
 .env
+lab04/secrets/*
+!lab04/secrets/.gitkeep
+vendor/
+.phpunit.cache/
+build/
