@@ -1,0 +1,57 @@
+// Конвейер сборки и тестирования проекта isbn-tools.
+pipeline {
+    // Сборка выполняется только на SSH-агенте с меткой php-agent.
+    agent {
+        label 'php-agent'
+    }
+
+    // Отметки времени в журнале и ограничение длительности сборки.
+    options {
+        timestamps()
+        timeout(time: 10, unit: 'MINUTES')
+    }
+
+    // Каталог PHP-проекта относительно корня репозитория.
+    environment {
+        PROJECT_DIR = 'lab04/isbn-tools'
+    }
+
+    stages {
+        stage('Install Dependencies') {
+            steps {
+                // Проверка окружения, проверка composer.json и установка зависимостей из composer.lock.
+                echo 'Preparing project...'
+                dir("${PROJECT_DIR}") {
+                    sh 'php --version'
+                    sh 'composer --version'
+                    sh 'composer validate --strict'
+                    sh 'composer install --no-interaction --no-progress --prefer-dist'
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                // Запуск модульных тестов PHPUnit с отчётом в формате JUnit.
+                echo 'Running tests...'
+                dir("${PROJECT_DIR}") {
+                    sh 'vendor/bin/phpunit --log-junit build/junit.xml'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // Публикация результатов тестов; пустой результат не считается ошибкой.
+            junit testResults: "${PROJECT_DIR}/build/junit.xml", allowEmptyResults: true
+            echo 'Pipeline completed.'
+        }
+        success {
+            echo 'All stages completed successfully!'
+        }
+        failure {
+            echo 'Errors detected in the pipeline.'
+        }
+    }
+}
