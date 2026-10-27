@@ -1,0 +1,39 @@
+# Jenkins Controller и SSH-агент.
+services:
+  # Контроллер Jenkins: веб-интерфейс на порту 8080, порт 50000 для входящих агентов.
+  jenkins-controller:
+    image: jenkins/jenkins:lts
+    container_name: jenkins-controller
+    # Перезапуск контейнера, если он не был остановлен вручную.
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    networks:
+      - jenkins-network
+
+  ssh-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ssh-agent
+    restart: unless-stopped
+    environment:
+      - JENKINS_AGENT_SSH_PUBKEY=${JENKINS_AGENT_SSH_PUBKEY}
+    # Рабочий каталог агента хранится в именованном томе.
+    volumes:
+      - jenkins_agent_volume:/home/jenkins/agent
+    depends_on:
+      - jenkins-controller
+    networks:
+      - jenkins-network
+
+volumes:
+  jenkins_home:
+  jenkins_agent_volume:
+
+networks:
+  jenkins-network:
+    driver: bridge

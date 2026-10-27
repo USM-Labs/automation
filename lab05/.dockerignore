@@ -1,0 +1,6 @@
+# Файлы, которые не должны попадать в контекст сборки образа
+secrets/
+.env
+isbn-tools/
+readme.md
+Jenkinsfile
