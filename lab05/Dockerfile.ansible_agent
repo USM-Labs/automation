@@ -1,0 +1,34 @@
+# Агент Ansible: sshd для подключения Jenkins, Java 21 и Ansible из репозитория Ubuntu.
+# Ubuntu 24.04: пакет ansible 9.2.0 (ansible-core 2.16.3) уже содержит коллекции
+# ansible.posix и community.general, нужные плейбукам.
+FROM ubuntu:24.04
+
+# Java 21 той же основной версии, что и у контроллера (Jenkins 2.580.1 требует Java 21 на агенте);
+# git для получения репозитория, rsync и ssh-клиент для модуля synchronize.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openssh-server openssh-client git rsync ansible openjdk-21-jre-headless ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Пользователь jenkins с UID 1000, как в образе SSH-агента; UID 1000 в базовом образе
+# занят пользователем ubuntu, поэтому он удаляется.
+RUN userdel --remove ubuntu \
+    && useradd --create-home --uid 1000 --shell /bin/bash jenkins \
+    && install -d -o jenkins -g jenkins -m 0755 /home/jenkins/agent \
+    && install -d -o jenkins -g jenkins -m 0700 /home/jenkins/.ssh
+
+# Вход только по ключу и только для пользователя jenkins; конфигурация проверяется при сборке.
+RUN printf '%s\n' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PermitRootLogin no' \
+        'AllowUsers jenkins' \
+        > /etc/ssh/sshd_config.d/10-key-only.conf \
+    && mkdir -p /run/sshd \
+    && sshd -t
+
+COPY docker/ansible-agent-entrypoint.sh /usr/local/bin/ansible-agent-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/ansible-agent-entrypoint.sh
+
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/ansible-agent-entrypoint.sh"]
