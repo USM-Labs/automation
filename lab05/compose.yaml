@@ -1,0 +1,74 @@
+# Стенд: Jenkins, SSH-агент, агент Ansible и тестовый сервер.
+services:
+  # Контроллер Jenkins: веб-интерфейс на порту 8080, порт 50000 для входящих агентов.
+  jenkins-controller:
+    image: jenkins/jenkins:lts
+    container_name: jenkins-controller
+    # Перезапуск контейнера, если он не был остановлен вручную.
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+    networks:
+      - jenkins-network
+
+  ssh-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh_agent
+    container_name: ssh-agent
+    restart: unless-stopped
+    environment:
+      - JENKINS_AGENT_SSH_PUBKEY=${JENKINS_AGENT_SSH_PUBKEY}
+    # Рабочий каталог агента хранится в именованном томе.
+    volumes:
+      - jenkins_agent_volume:/home/jenkins/agent
+    depends_on:
+      - jenkins-controller
+    networks:
+      - jenkins-network
+
+  ansible-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.ansible_agent
+    container_name: ansible-agent
+    restart: unless-stopped
+    # Внутри контейнера сценарий запуска ожидает ключ в переменной JENKINS_AGENT_SSH_PUBKEY.
+    environment:
+      - JENKINS_AGENT_SSH_PUBKEY=${JENKINS_ANSIBLE_AGENT_SSH_PUBKEY}
+    # Домашний каталог в томе: known_hosts с ключом test-server сохраняется при пересоздании контейнера.
+    volumes:
+      - jenkins_ansible_agent_home:/home/jenkins
+    depends_on:
+      - jenkins-controller
+      - test-server
+    networks:
+      - jenkins-network
+
+  test-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.test_server
+    container_name: test-server
+    restart: unless-stopped
+    environment:
+      - ANSIBLE_SSH_PUBKEY=${ANSIBLE_TEST_SERVER_SSH_PUBKEY}
+    # Сайт доступен с хоста на порту 8081; SSH открыт только внутри сети jenkins-network.
+    ports:
+      - "8081:80"
+    expose:
+      - "22"
+    networks:
+      - jenkins-network
+
+volumes:
+  jenkins_home:
+  jenkins_agent_volume:
+  jenkins_ansible_agent_home:
+
+networks:
+  jenkins-network:
+    driver: bridge

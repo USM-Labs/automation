@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Виртуальный хост проекта {{ app_name }}.
+<VirtualHost *:80>
+    ServerName {{ server_name }}
+    DocumentRoot {{ app_root }}/public
+
+    <Directory {{ app_root }}/public>
+        Require all granted
+        AllowOverride None
+        DirectoryIndex index.php
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/{{ app_name }}_error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ app_name }}_access.log combined
+</VirtualHost>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Конфигурация PHPUnit для библиотеки isbn-tools. -->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="false"
+         cacheDirectory=".phpunit.cache"
+         failOnRisky="true"
+         failOnWarning="true"
+         beStrictAboutOutputDuringTests="true">
+    <!-- Все тесты проекта находятся в каталоге tests. -->
+    <testsuites>
+        <testsuite name="isbn-tools">
+            <directory>tests</directory>
+        </testsuite>
+    </testsuites>
+    <!-- Исходный код библиотеки, к которому относятся тесты. -->
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>

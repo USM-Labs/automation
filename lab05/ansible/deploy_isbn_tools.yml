@@ -1,0 +1,69 @@
+---
+# Развёртывание isbn-tools на тестовом сервере.
+# Теги соответствуют стадиям конвейера: copy (копирование файлов) и configure (настройка проекта).
+# Без тегов плейбук выполняет развёртывание полностью.
+- name: Развернуть isbn-tools на тестовом сервере
+  hosts: test_servers
+  become: true
+
+  vars:
+    app_root: /var/www/isbn-tools
+    src_dir: "{{ playbook_dir }}/../isbn-tools/"
+    check_isbn: "0306406152"
+    check_isbn13: "9780306406157"
+
+  tasks:
+    # Тесты и служебные файлы на сервер не копируются; vendor/ исключён и поэтому не удаляется.
+    # Владелец и группа не переносятся с агента, права приводятся к 755/644 при копировании.
+    # verify_host: по умолчанию модуль отключает для rsync проверку ключа хоста.
+    - name: Скопировать файлы проекта на сервер
+      ansible.posix.synchronize:
+        src: "{{ src_dir }}"
+        dest: "{{ app_root }}/"
+        delete: true
+        verify_host: true
+        owner: false
+        group: false
+        rsync_opts:
+          - "--chmod=D755,F644"
+          - "--exclude=tests/"
+          - "--exclude=vendor/"
+          - "--exclude=build/"
+          - "--exclude=.phpunit.cache/"
+          - "--exclude=phpunit.xml.dist"
+      tags: copy
+
+    # Зависимости устанавливаются из composer.lock без пакетов для разработки.
+    - name: Установить зависимости Composer без dev-пакетов
+      community.general.composer:
+        command: install
+        working_dir: "{{ app_root }}"
+        no_dev: true
+        optimize_autoloader: true
+      tags: configure
+
+    # Права задаются явно и здесь: на агенте файлы создаются с umask 0002 (запись для группы).
+    - name: Назначить владельца, группу и права файлов проекта
+      ansible.builtin.file:
+        path: "{{ app_root }}"
+        state: directory
+        recurse: true
+        owner: root
+        group: www-data
+        mode: "u=rwX,g=rX,o=rX"
+      tags: configure
+
+    - name: Запросить страницу с проверочным номером
+      ansible.builtin.uri:
+        url: "http://localhost/?isbn={{ check_isbn }}"
+        return_content: true
+      register: check_page
+      tags: configure
+
+    - name: Убедиться, что страница вернула ISBN-13
+      ansible.builtin.assert:
+        that:
+          - check_isbn13 in check_page.content
+        success_msg: "Страница вернула {{ check_isbn13 }}."
+        fail_msg: "На странице нет {{ check_isbn13 }}."
+      tags: configure
