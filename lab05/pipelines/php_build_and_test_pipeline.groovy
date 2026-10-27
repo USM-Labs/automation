@@ -1,22 +1,30 @@
-// Конвейер сборки и тестирования проекта isbn-tools.
+// Конвейер сборки и тестирования проекта isbn-tools на SSH-агенте.
 pipeline {
     // Сборка выполняется только на SSH-агенте с меткой php-agent.
     agent {
         label 'php-agent'
     }
 
-    // Отметки времени в журнале и ограничение длительности сборки.
+    // Получение репозитория выполняется явной стадией Checkout.
     options {
+        skipDefaultCheckout()
         timestamps()
-        timeout(time: 10, unit: 'MINUTES')
+        timeout(time: 15, unit: 'MINUTES')
     }
 
     // Каталог PHP-проекта относительно корня репозитория.
     environment {
-        PROJECT_DIR = 'lab04/isbn-tools'
+        PROJECT_DIR = 'lab05/isbn-tools'
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                // Клонирование репозитория с PHP-проектом.
+                checkout scm
+            }
+        }
+
         stage('Install Dependencies') {
             steps {
                 // Проверка окружения, проверка composer.json и установка зависимостей из composer.lock.
@@ -39,12 +47,17 @@ pipeline {
                 }
             }
         }
+
+        stage('Report') {
+            steps {
+                // Публикация результатов тестов в Jenkins.
+                junit testResults: "${PROJECT_DIR}/build/junit.xml"
+            }
+        }
     }
 
     post {
         always {
-            // Публикация результатов тестов; пустой результат не считается ошибкой.
-            junit testResults: "${PROJECT_DIR}/build/junit.xml", allowEmptyResults: true
             echo 'Pipeline completed.'
         }
         success {
