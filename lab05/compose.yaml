@@ -17,7 +17,7 @@ services:
   ssh-agent:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.ssh_agent
     container_name: ssh-agent
     restart: unless-stopped
     environment:
