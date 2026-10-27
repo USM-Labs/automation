@@ -1,0 +1,33 @@
+# Тестовый сервер: Ubuntu 24.04 с sshd и пользователем ansible.
+# Apache и PHP в образ не входят: их устанавливает плейбук setup_test_server.yml.
+# Ubuntu 24.04 выбрана из-за PHP 8.3: в Ubuntu 22.04 есть только PHP 8.1,
+# а isbn-tools требует PHP 8.2 и выше.
+FROM ubuntu:24.04
+
+# sudo нужен для повышения привилегий (become), python3 нужен модулям Ansible.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-server sudo python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Пользователь ansible без пароля; sudo без пароля, файл sudoers проверяется visudo.
+RUN useradd --create-home --shell /bin/bash ansible \
+    && install -d -o ansible -g ansible -m 0700 /home/ansible/.ssh \
+    && printf 'ansible ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/ansible \
+    && chmod 0440 /etc/sudoers.d/ansible \
+    && visudo -cf /etc/sudoers.d/ansible
+
+# Вход только по ключу и только для пользователя ansible; конфигурация проверяется при сборке.
+RUN printf '%s\n' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PermitRootLogin no' \
+        'AllowUsers ansible' \
+        > /etc/ssh/sshd_config.d/10-key-only.conf \
+    && mkdir -p /run/sshd \
+    && sshd -t
+
+COPY docker/test-server-entrypoint.sh /usr/local/bin/test-server-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/test-server-entrypoint.sh
+
+EXPOSE 22 80
+ENTRYPOINT ["/usr/local/bin/test-server-entrypoint.sh"]
