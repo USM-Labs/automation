@@ -14,12 +14,16 @@
 
   tasks:
     # Тесты и служебные файлы на сервер не копируются; vendor/ исключён и поэтому не удаляется.
+    # Владелец и группа не переносятся с агента, права приводятся к 755/644 при копировании.
     - name: Скопировать файлы проекта на сервер
       ansible.posix.synchronize:
         src: "{{ src_dir }}"
         dest: "{{ app_root }}/"
         delete: true
+        owner: false
+        group: false
         rsync_opts:
+          - "--chmod=D755,F644"
           - "--exclude=tests/"
           - "--exclude=vendor/"
           - "--exclude=build/"
@@ -36,8 +40,7 @@
         optimize_autoloader: true
       tags: configure
 
-    # Права задаются явно: synchronize переносит права из рабочего каталога агента,
-    # где файлы создаются с umask 0002 (запись для группы).
+    # Права задаются явно и здесь: на агенте файлы создаются с umask 0002 (запись для группы).
     - name: Назначить владельца, группу и права файлов проекта
       ansible.builtin.file:
         path: "{{ app_root }}"
