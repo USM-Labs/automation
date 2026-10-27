@@ -1,64 +1,72 @@
-# Лабораторная работа 4: настройка Jenkins для автоматизации задач DevOps
+# Лабораторная работа 5: настройка тестового сервера с помощью Ansible
 
 ## Цель
 
-Цель работы: научиться настраивать Jenkins для автоматизации задач DevOps.
+Цель работы: научиться создавать плейбуки Ansible для автоматизации настройки серверов.
 
-## Требования
+## Требования и версии
 
 - Docker 24+ (проверено на Docker Engine 29.8.2)
 - Docker Compose v2 (команда `docker compose`, проверено на версии 5.6.0)
-- свободные порты хоста 8080 и 50000
+- свободные порты хоста 8080 и 50000 (Jenkins) и 8081 (сайт на тестовом сервере)
 
-На моей машине порт 8080 занят контейнером `php_apache` (сервис lab02prep). Без его
-остановки контроллер не запускается:
-
-```
-Bind for 0.0.0.0:8080 failed: port is already allocated
-```
-
-Поэтому перед `docker compose up` контейнер останавливается, а после работы запускается снова:
-
-```
-docker stop php_apache
-# ... работа с lab04 ...
-docker start php_apache
-```
+Если порт на хосте занят, его нужно освободить или изменить левую часть записи в `ports` файла `compose.yaml`.
 
 Версии компонентов, с которыми выполнена проверка:
 
-| Компонент | Версия |
-|-----------|--------|
-| Jenkins (образ `jenkins/jenkins:lts`) | 2.580.1 LTS, Java 21.0.12 |
-| Образ агента | `jenkins/ssh-agent:bookworm-jdk21` (Debian 12.10, Java 21.0.6) |
-| PHP | 8.2.35 |
-| Composer | 2.10.3 (из образа `composer:2.10`) |
-| PHPUnit | 11.5.57 |
-| Плагин SSH Build Agents | 3.1097.v868116049892 |
-| Плагин Git | 5.11.0 |
-| Плагин Timestamper | 1.30 |
-| Плагин JUnit | 1442.vb_b_a_467df2767 |
+| Компонент | Где | Версия |
+|-----------|-----|--------|
+| Jenkins (`jenkins/jenkins:lts`) | jenkins-controller | 2.580.1 LTS, Java 21.0.12 |
+| Базовый образ | ssh-agent | `jenkins/ssh-agent:bookworm-jdk21` (Debian 12.10, Java 21.0.6) |
+| PHP / Composer / PHPUnit | ssh-agent | 8.2.35 / 2.10.3 / 11.5.57 |
+| Базовый образ | ansible-agent, test-server | `ubuntu:24.04` (Ubuntu 24.04.5 LTS) |
+| Java (`openjdk-21-jre-headless`) | ansible-agent | 21.0.12.1 |
+| Ansible (пакет `ansible` из Ubuntu) | ansible-agent | 9.2.0, ansible-core 2.16.3, Python 3.12.3 |
+| Коллекции `ansible.posix` / `community.general` | ansible-agent | 1.5.4 / 8.3.0 (входят в пакет `ansible`) |
+| git / rsync | ansible-agent | 2.43.0 / 3.2.7 |
+| OpenSSH / Python | test-server | 9.6p1 / 3.12.3 |
+| Apache / PHP / Composer | test-server (ставит Ansible) | 2.4.58 / 8.3.6 / 2.7.1 |
+| Плагин Docker (`docker-plugin`) | Jenkins | 1336.v3711dec712de |
+| Плагин Docker Pipeline (`docker-workflow`) | Jenkins | 653.v2f2c08eff0ec |
+| Плагин GitHub Integration (`github-pullrequest`) | Jenkins | 0.7.5 |
+| Плагин SSH Agent (`ssh-agent`) | Jenkins | 433.v9e73d67c3f74 |
+| Плагин SSH Build Agents (`ssh-slaves`) | Jenkins | 3.1097.v868116049892 |
+| Плагины Git / Pipeline / JUnit | Jenkins | 5.11.0 / 608.v67378e9d3db_1 / 1442.vb_b_a_467df2767 |
+| Плагины Timestamper / Credentials Binding | Jenkins | 1.30 / 728.v902a_273b_8947 |
 
-## Структура проекта
+## Структура
 
 ```
-lab04/
+lab05/
 ├── .dockerignore
 ├── .env.example
-├── Dockerfile
-├── Jenkinsfile
-├── docker-compose.yml
+├── compose.yaml
+├── Dockerfile.ssh_agent
+├── Dockerfile.ansible_agent
+├── Dockerfile.test_server
+├── docker/
+│   ├── ansible-agent-entrypoint.sh
+│   └── test-server-entrypoint.sh
+├── ansible/
+│   ├── ansible.cfg
+│   ├── hosts.ini
+│   ├── setup_test_server.yml
+│   ├── deploy_isbn_tools.yml
+│   └── templates/
+│       └── isbn-tools.conf.j2
+├── pipelines/
+│   ├── php_build_and_test_pipeline.groovy
+│   ├── ansible_setup_pipeline.groovy
+│   └── php_deploy_pipeline.groovy
 ├── isbn-tools/
 │   ├── composer.json
 │   ├── composer.lock
 │   ├── phpunit.xml.dist
+│   ├── public/
+│   │   ├── index.php
+│   │   └── style.css
 │   ├── src/
-│   │   ├── InvalidIsbnException.php
-│   │   ├── Isbn.php
-│   │   └── IsbnValidator.php
 │   └── tests/
-│       ├── IsbnTest.php
-│       └── IsbnValidatorTest.php
 ├── readme.md
 └── secrets/
     └── .gitkeep
@@ -66,499 +74,800 @@ lab04/
 
 | Файл | Назначение |
 |------|------------|
-| `docker-compose.yml` | сервисы `jenkins-controller` и `ssh-agent`, тома `jenkins_home` и `jenkins_agent_volume`, сеть `jenkins-network` |
-| `Dockerfile` | образ SSH-агента: `jenkins/ssh-agent:bookworm-jdk21` + PHP CLI, расширения для PHPUnit, unzip, Composer |
-| `.dockerignore` | исключает ключи, `.env`, исходники проекта и документацию из контекста сборки образа |
-| `.env.example` | шаблон файла `.env` с переменной `JENKINS_AGENT_SSH_PUBKEY` |
-| `Jenkinsfile` | описание конвейера: стадии `Install Dependencies` и `Test`, блок `post` |
-| `isbn-tools/composer.json` | описание PHP-библиотеки, автозагрузка PSR-4, зависимость PHPUnit `^11.5` |
-| `isbn-tools/composer.lock` | зафиксированные версии зависимостей (создан в образе агента, PHP 8.2) |
-| `isbn-tools/phpunit.xml.dist` | конфигурация PHPUnit: набор тестов `isbn-tools`, строгие режимы |
-| `isbn-tools/src/*.php` | классы библиотеки |
-| `isbn-tools/tests/*.php` | модульные тесты |
-| `readme.md` | данный отчёт |
-| `secrets/.gitkeep` | сохраняет каталог `secrets/` в репозитории; ключи создаются локально и не коммитятся |
+| `compose.yaml` | сервисы `jenkins-controller`, `ssh-agent`, `ansible-agent`, `test-server`; тома и сеть `jenkins-network` |
+| `Dockerfile.ssh_agent` | образ SSH-агента для сборки PHP-проекта (без изменений по сравнению с lab04) |
+| `Dockerfile.ansible_agent` | образ агента Ansible: Ubuntu 24.04, sshd, Java 21, Ansible, git, rsync |
+| `Dockerfile.test_server` | образ тестового сервера: Ubuntu 24.04, sshd, sudo, python3, пользователь `ansible` |
+| `docker/*.sh` | сценарии запуска контейнеров: установка открытого ключа из переменной окружения и запуск sshd |
+| `.env.example` | шаблон `.env` с тремя открытыми ключами |
+| `.dockerignore` | исключает из контекста сборки ключи, `.env`, проект, плейбуки, конвейеры и отчёт |
+| `ansible/ansible.cfg` | настройки Ansible: инвентарь, строгая проверка ключа хоста, повышение привилегий |
+| `ansible/hosts.ini` | инвентарь: хост `test-server`, пользователь `ansible` |
+| `ansible/setup_test_server.yml` | плейбук настройки сервера: Apache2, PHP, виртуальный хост |
+| `ansible/deploy_isbn_tools.yml` | плейбук развёртывания isbn-tools |
+| `ansible/templates/isbn-tools.conf.j2` | шаблон виртуального хоста Apache |
+| `pipelines/*.groovy` | три конвейера Jenkins |
+| `isbn-tools/` | PHP-библиотека из lab04 и веб-страница `public/index.php` |
+| `secrets/.gitkeep` | сохраняет каталог `secrets/`; ключи создаются локально и не коммитятся |
 
-В корневом `.gitignore` репозитория игнорируются `lab04/secrets/*` (кроме `.gitkeep`),
-`.env`, `vendor/`, `.phpunit.cache/` и `build/`. Закрытый ключ, файл `.env`, каталог
-`vendor/` и отчёты сборки в репозиторий не попадают.
+В корневом `.gitignore` игнорируются `lab05/secrets/*` (кроме `.gitkeep`), `.env`, `vendor/`,
+`.phpunit.cache/` и `build/`. Закрытые ключи и файл `.env` в репозиторий не попадают.
 
 ## 1. Описание проекта
 
-### 1.1 Библиотека isbn-tools
+### 1.1 Стенд
 
-`isbn-tools`: небольшая PHP-библиотека для проверки и преобразования номеров ISBN
-(International Standard Book Number). Существуют два формата номера:
+Стенд состоит из четырёх контейнеров в одной сети `jenkins-network`:
 
-1. **ISBN-10**: 9 цифр и контрольный символ. Сумма произведений цифр на веса 10, 9, ..., 1
-   должна делиться на 11. Контрольный символ принимает значения от 0 до 10, значение 10
-   записывается буквой `X`.
-2. **ISBN-13**: 13 цифр с префиксом 978 или 979. Цифры умножаются поочерёдно на веса 1 и 3,
-   сумма должна делиться на 10.
+| Сервис | Образ | Роль | Порты хоста |
+|--------|-------|------|-------------|
+| `jenkins-controller` | `jenkins/jenkins:lts` | управляет всеми конвейерами | 8080, 50000 |
+| `ssh-agent` | `Dockerfile.ssh_agent` | агент `php-agent`: Composer и PHPUnit | нет |
+| `ansible-agent` | `Dockerfile.ansible_agent` | агент `ansible-agent`: выполняет плейбуки | нет |
+| `test-server` | `Dockerfile.test_server` | тестовый сервер, который настраивает Ansible | 8081 → 80 |
 
-Номер ISBN-10 переводится в ISBN-13 так: к первым 9 цифрам добавляется префикс 978 и
-заново вычисляется контрольная цифра. Обратное преобразование возможно только для
-префикса 978; у номеров с префиксом 979 нет эквивалента ISBN-10.
+Подключения и ключи:
 
-Пространство имён: `Splavski\IsbnTools`. Во всех файлах указан `declare(strict_types=1);`,
-все классы объявлены как `final`.
+| Откуда | Куда | Пользователь | Ключевая пара | Где закрытый ключ |
+|--------|------|--------------|---------------|-------------------|
+| Jenkins | ssh-agent | `jenkins` | `jenkins_agent_ssh_key` | учётные данные `ssh-agent-key` |
+| Jenkins | ansible-agent | `jenkins` | `jenkins_ansible_agent_key` | учётные данные `ansible-agent-key` |
+| ansible-agent | test-server | `ansible` | `ansible_test_server_key` | учётные данные `ansible-test-server-key` |
 
-| Класс | Метод | Назначение |
-|-------|-------|------------|
-| `IsbnValidator` | `normalize(string $raw): string` | удаляет дефисы и пробелы, переводит `x` в `X` |
-| | `isValidIsbn10(string $isbn): bool` | проверка формата и контрольного символа ISBN-10 |
-| | `isValidIsbn13(string $isbn): bool` | проверка префикса, формата и контрольной цифры ISBN-13 |
-| | `checkDigit10(string $first9): string` | контрольный символ ISBN-10 (`0`..`9` или `X`) |
-| | `checkDigit13(string $first12): string` | контрольная цифра ISBN-13 |
-| `Isbn` | `fromString(string $raw): self` | разбор ISBN-10 или ISBN-13, при ошибке исключение `InvalidIsbnException` |
-| | `toIsbn13(): string` | номер в формате ISBN-13 |
-| | `toIsbn10(): ?string` | номер в формате ISBN-10 или `null` для префикса 979 |
-| | `equals(self $other): bool` | сравнение двух номеров |
-| `InvalidIsbnException` | нет | наследник `\InvalidArgumentException` |
+Открытые ключи попадают в контейнеры через переменные окружения из `.env`. Закрытые ключи
+хранятся только в Jenkins; в образы и в репозиторий ключи не входят.
 
-Объект `Isbn` неизменяемый: конструктор закрытый, номер хранится в свойстве `readonly`
-в формате ISBN-13. Сообщения исключений:
+### 1.2 Проект isbn-tools
 
-- `Номер ISBN "%s" должен содержать 10 или 13 символов.`
-- `Номер ISBN "%s" имеет неверную контрольную цифру.`
+`isbn-tools` перенесён из lab04 без изменений в `src/`, `tests/`, `composer.json` и
+`composer.lock`: библиотека проверяет номера ISBN-10 и ISBN-13 и переводит их из одного
+формата в другой (класс `Splavski\IsbnTools\Isbn`). Тесты прежние: 23 теста PHPUnit.
 
-### 1.2 Тесты
+### 1.3 Веб-страница
 
-13 тестовых методов в двух классах; с учётом наборов данных (`#[DataProvider]`)
-PHPUnit выполняет 23 теста.
+Для развёртывания добавлен каталог `public/`:
 
-| № | Класс | Метод | Что проверяется |
-|---|-------|-------|-----------------|
-| 1 | `IsbnValidatorTest` | `testNormalizeRemovesHyphensAndSpaces` | `0-8044 2957-x` → `080442957X` |
-| 2 | | `testAcceptsValidIsbn10` | 3 набора: `0306406152`, `080442957X`, `0262033844` |
-| 3 | | `testRejectsInvalidIsbn10` | 4 набора: неверная контрольная цифра, 9 цифр, `X` не в конце, буквы |
-| 4 | | `testAcceptsValidIsbn13` | 3 набора: `9780306406157`, `9780262033848`, `9791090636071` |
-| 5 | | `testRejectsInvalidIsbn13` | 4 набора: неверная контрольная цифра, 12 цифр, префикс 977, буква `X` |
-| 6 | | `testCheckDigit10CanBeX` | `080442957` → `X` |
-| 7 | | `testCheckDigit13` | `978030640615` → `7` |
-| 8 | `IsbnTest` | `testConvertsIsbn10ToIsbn13` | `0-306-40615-2` → `9780306406157` |
-| 9 | | `testToIsbn10RoundTrip` | `080442957X` → ISBN-13 → `080442957X` |
-| 10 | | `testToIsbn10IsNullFor979Prefix` | `979-10-90636-07-1` → `null` |
-| 11 | | `testRejectsWrongLength` | исключение и сообщение для `12345` |
-| 12 | | `testRejectsWrongCheckDigit` | исключение и сообщение для `978-0-306-40615-8` |
-| 13 | | `testEqualsComparesNormalizedValues` | ISBN-10 и ISBN-13 одной книги равны, разные книги не равны |
-
-Все контрольные цифры в тестах вычислены заранее и проверены вручную по правилам из 1.1.
-
-### 1.3 Выбор версий
-
-1. Тег образа агента зафиксирован (`bookworm-jdk21`), а не взят `latest`. Тег `latest`
-   со временем начинает указывать на другой выпуск Debian и другую версию PHP, и сборка
-   перестаёт быть воспроизводимой. По той же причине Composer копируется из образа с
-   тегом `composer:2.10`, а `composer.lock` хранится в репозитории.
-2. В Debian 12 (bookworm) пакет `php-cli` содержит PHP 8.2. PHPUnit 12 требует
-   PHP >= 8.3, поэтому выбран PHPUnit 11.5 (требует PHP >= 8.2). Попытка установить
-   PHPUnit 12 описана в разделе 7.3.
-3. `composer.lock` создан командой `composer update` внутри собранного образа агента,
-   чтобы зависимости были подобраны для той же версии PHP, на которой работает конвейер.
+- `index.php` принимает номер из GET-параметра `isbn`, вызывает `Isbn::fromString()` и выводит
+  таблицу: введённое значение, ISBN-13, ISBN-10 (для префикса 979 выводится `нет: префикс 979`)
+  и статус;
+- при неверном номере страница возвращает код `422` и сообщение исключения `InvalidIsbnException`;
+- под формой приведены четыре примера: три корректных номера и один с неверной контрольной цифрой;
+- весь вывод проходит через `htmlspecialchars`; JavaScript не используется;
+- `style.css`: системный шрифт, ширина до 40rem, один акцентный цвет.
 
 ## 2. Настройка Jenkins Controller
 
-Все команды выполняются из каталога `lab04/`.
-
-1. Запуск контроллера:
+1. Запуск стенда:
 
    ```
-   docker compose up -d jenkins-controller
-   ```
-
-2. Пароль для первого входа:
-
-   ```
-   docker exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword
-   ```
-
-3. В браузере открывается `http://localhost:8080/`, на странице «Unlock Jenkins»
-   вводится пароль из шага 2.
-4. На странице «Customize Jenkins» выбирается «Install suggested plugins». В набор
-   рекомендуемых плагинов (19 плагинов, вместе с зависимостями установлено 94) входят
-   Pipeline, Git, SSH Build Agents и Timestamper.
-5. Создаётся учётная запись администратора (страница «Create First Admin User»).
-6. На странице «Instance Configuration» оставляется Jenkins URL `http://localhost:8080/`,
-   затем «Save and Finish» и «Start using Jenkins».
-7. Проверка плагинов: Manage Jenkins → Plugins → Installed plugins. Должны быть
-   установлены:
-
-   | Плагин | Для чего нужен |
-   |--------|----------------|
-   | SSH Build Agents (`ssh-slaves`) | способ запуска агента «Launch agents via SSH» |
-   | Git (`git`) | получение Jenkinsfile и исходников из репозитория |
-   | Timestamper (`timestamper`) | шаг `timestamps()` в Jenkinsfile |
-   | JUnit (`junit`) | шаг `junit` в Jenkinsfile; устанавливается как зависимость рекомендуемых плагинов |
-
-   Все четыре плагина установлены после «Install suggested plugins»; отдельная установка
-   не потребовалась.
-
-## 3. Настройка SSH-агента
-
-1. Создание пары ключей в каталоге `secrets/` (пароль ключа пустой, так как агент
-   подключается без участия пользователя):
-
-   ```
-   cd secrets
-   ssh-keygen -f jenkins_agent_ssh_key -C jenkins-agent
-   cd ..
-   ```
-
-   OpenSSH по умолчанию создаёт ключ типа ed25519. Параметр `-C jenkins-agent` задаёт
-   комментарий ключа вместо имени пользователя и хоста. Результат:
-   `secrets/jenkins_agent_ssh_key` (закрытый ключ) и `secrets/jenkins_agent_ssh_key.pub`
-   (открытый ключ).
-
-2. Создание файла `.env` по шаблону `.env.example`. Открытый ключ записывается одной
-   строкой:
-
-   ```
-   printf 'JENKINS_AGENT_SSH_PUBKEY=%s\n' "$(cat secrets/jenkins_agent_ssh_key.pub)" > .env
-   ```
-
-   Docker Compose читает `.env` из каталога проекта и подставляет значение в
-   `JENKINS_AGENT_SSH_PUBKEY=${JENKINS_AGENT_SSH_PUBKEY}`. Скрипт образа `jenkins/ssh-agent`
-   при старте записывает этот ключ в `/home/jenkins/.ssh/authorized_keys`.
-
-3. Файл `.dockerignore` исключает из контекста сборки `secrets/`, `.env`, `isbn-tools/`,
-   `readme.md` и `Jenkinsfile`. Образу агента эти файлы не нужны: ключ передаётся через
-   переменную окружения, а исходники агент получает из Git во время сборки. Так закрытый
-   ключ не попадает в контекст сборки и в слои образа.
-
-4. Сборка образа агента и перезапуск проекта, чтобы применить `.env`:
-
-   ```
+   cp .env.example .env    # затем подставить открытые ключи, см. разделы 3, 4 и 5
    docker compose up -d --build
    ```
 
-5. Проверка:
+2. Пароль для разблокировки:
 
    ```
-   $ docker compose exec ssh-agent php --version
-   PHP 8.2.35 (cli) (built: Oct 21 2026 06:29:51) (NTS)
-   Copyright (c) The PHP Group
-   Zend Engine v4.2.35, Copyright (c) Zend Technologies
-       with Zend OPcache v8.2.35, Copyright (c), by Zend Technologies
+   docker compose exec jenkins-controller cat /var/jenkins_home/secrets/initialAdminPassword
    ```
 
-Состав `Dockerfile`:
+3. На `http://localhost:8080` ввести пароль, выбрать **Install suggested plugins**.
+4. Создать первого администратора, оставить Jenkins URL `http://localhost:8080/`.
+5. **Manage Jenkins → Plugins → Available plugins**: установить плагины из задания:
 
-| Инструкция | Назначение |
-|------------|------------|
-| `FROM jenkins/ssh-agent:bookworm-jdk21` | базовый образ с sshd, Java 21 и git |
-| `php-cli` | интерпретатор PHP 8.2 |
-| `php-xml` | расширения dom, xml, xmlwriter, необходимые PHPUnit |
-| `php-mbstring` | расширение mbstring, необходимое PHPUnit |
-| `unzip` | распаковка архивов пакетов Composer |
-| `COPY --from=composer:2.10` | Composer 2.10 из официального образа |
+   | Плагин | Идентификатор | Версия |
+   |--------|---------------|--------|
+   | Docker | `docker-plugin` | 1336.v3711dec712de |
+   | Docker Pipeline | `docker-workflow` | 653.v2f2c08eff0ec |
+   | GitHub Integration | `github-pullrequest` | 0.7.5 |
+   | SSH Agent | `ssh-agent` | 433.v9e73d67c3f74 |
 
-## 4. Подключение агента к Jenkins
+   Плагины SSH Build Agents, Git, Pipeline, Timestamper и Credentials Binding входят в набор
+   рекомендуемых. JUnit устанавливается как зависимость. После установки Jenkins перезапускается.
 
-### 4.1 Учётные данные
+## 3. Настройка SSH-агента
 
-1. Manage Jenkins → Credentials → System → Global credentials (unrestricted) → Add Credentials.
-2. Поля:
+`Dockerfile.ssh_agent` совпадает с `Dockerfile` из lab04: `jenkins/ssh-agent:bookworm-jdk21`,
+пакеты `php-cli php-xml php-mbstring unzip`, Composer из образа `composer:2.10`.
 
-   | Поле | Значение |
-   |------|----------|
-   | Kind | SSH Username with private key |
-   | Scope | Global |
-   | ID | `ssh-agent-key` |
-   | Description | Ключ SSH-агента ssh-agent1 |
-   | Username | `jenkins` |
-   | Private Key | Enter directly → содержимое файла `secrets/jenkins_agent_ssh_key` |
-   | Passphrase | пусто |
+1. Ключевая пара Jenkins → ssh-agent:
 
-3. Create.
+   ```
+   ssh-keygen -t ed25519 -N "" -C jenkins-ssh-agent -f secrets/jenkins_agent_ssh_key
+   ```
 
-### 4.2 Проверка ключа хоста (Known hosts file)
+   Открытый ключ записывается в `.env` как `JENKINS_AGENT_SSH_PUBKEY`.
 
-Для узла выбрана стратегия «Known hosts file Verification Strategy». Контроллер подключается
-только к хосту, чей ключ уже записан в `/var/jenkins_home/.ssh/known_hosts`; подмена хоста
-`ssh-agent` в сети будет обнаружена. Стратегия «Non verifying» такой проверки не выполняет.
+2. Учётные данные: **Manage Jenkins → Credentials → System → Global credentials → Add Credentials**:
+   Kind **SSH Username with private key**, ID `ssh-agent-key`, Username `jenkins`,
+   Private Key **Enter directly** (содержимое `secrets/jenkins_agent_ssh_key`).
 
-Ключ хоста агента заносится в `known_hosts` контроллера до запуска узла:
+3. Ключи хостов обоих агентов заносятся в `known_hosts` контроллера одной командой:
 
-```
-docker exec jenkins-controller sh -c 'mkdir -p ~/.ssh && ssh-keyscan -H ssh-agent >> ~/.ssh/known_hosts'
-```
+   ```
+   docker compose exec -u jenkins jenkins-controller sh -c \
+     'mkdir -p -m 700 ~/.ssh && ssh-keyscan -t ed25519 ssh-agent ansible-agent >> ~/.ssh/known_hosts'
+   ```
 
-Команда выполняется внутри контроллера, поэтому имя `ssh-agent` разрешается через сеть
-`jenkins-network`. Ключ `-H` хеширует имена хостов в файле.
+   Отпечатки в `known_hosts` сравниваются с ключами самих агентов:
 
-Образ `jenkins/ssh-agent` создаёт ключи хоста заново при каждом создании контейнера.
-После пересоздания `ssh-agent` (например, `docker compose up -d` после изменения `.env`)
-запись в `known_hosts` устаревает, и её нужно обновить (см. раздел 7.3, проблема 3).
+   ```
+   $ docker compose exec -u jenkins jenkins-controller ssh-keygen -lf /var/jenkins_home/.ssh/known_hosts
+   256 SHA256:l8y4rQCyO2czLl1oD1vilpfeB1DBaCQwVNvIj7Q+epk ansible-agent (ED25519)
+   256 SHA256:YTIafRsXoiQB3Kj3U3mDJWd2WHodjPFDeu4VtUN4QA8 ssh-agent (ED25519)
+   $ docker compose exec ssh-agent ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   256 SHA256:YTIafRsXoiQB3Kj3U3mDJWd2WHodjPFDeu4VtUN4QA8 root@2413f49d0927 (ED25519)
+   $ docker compose exec ansible-agent ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   256 SHA256:l8y4rQCyO2czLl1oD1vilpfeB1DBaCQwVNvIj7Q+epk root@buildkitsandbox (ED25519)
+   ```
 
-### 4.3 Узел ssh-agent1
+   Отпечатки совпадают. Комментарий ключа показывает разницу образов: `jenkins/ssh-agent`
+   создаёт ключи хоста при запуске контейнера (`root@<id контейнера>`), а в образе
+   `ansible-agent` они созданы при сборке (`root@buildkitsandbox`). Поэтому после
+   пересоздания контейнера `ssh-agent` сканирование нужно повторить, как в lab04.
 
-1. Manage Jenkins → Nodes → New Node.
-2. Node name: `ssh-agent1`, тип Permanent Agent, Create.
-3. Поля:
+4. Узел: **Manage Jenkins → Nodes → New Node**, имя `ssh-agent1`, **Permanent Agent**:
 
-   | Поле | Значение |
-   |------|----------|
+   | Параметр | Значение |
+   |----------|----------|
    | Number of executors | 1 |
    | Remote root directory | `/home/jenkins/agent` |
    | Labels | `php-agent` |
    | Usage | Only build jobs with label expressions matching this node |
    | Launch method | Launch agents via SSH |
    | Host | `ssh-agent` |
-   | Credentials | `jenkins (Ключ SSH-агента ssh-agent1)` |
+   | Credentials | `ssh-agent-key` |
    | Host Key Verification Strategy | Known hosts file Verification Strategy |
-   | Port (Advanced) | 22 |
-   | Availability | Keep this agent online as much as possible |
 
-4. Save.
+## 4. Агент Ansible
 
-Режим Usage «Only build jobs with label expressions matching this node» означает, что на
-агенте выполняются только задания с меткой `php-agent`.
+### 4.1 Dockerfile.ansible_agent
 
-Журнал узла (Nodes → ssh-agent1 → Log) после успешного подключения (сокращено):
+| Инструкция | Назначение |
+|------------|------------|
+| `FROM ubuntu:24.04` | задание требует Ubuntu; тег зафиксирован |
+| `apt-get install ... openssh-server openssh-client git rsync ansible openjdk-21-jre-headless ca-certificates` | sshd для подключения Jenkins; Java 21 той же основной версии, что у контроллера (Jenkins 2.580.1 требует Java 21 на агенте); git для получения репозитория; rsync и ssh-клиент для модуля `synchronize`; пакет `ansible` 9.2.0 |
+| `userdel --remove ubuntu && useradd --uid 1000 ... jenkins` | пользователь `jenkins` с UID 1000, как в образе SSH-агента; в `ubuntu:24.04` UID 1000 занят пользователем `ubuntu` |
+| `install -d ... /home/jenkins/agent`, `/home/jenkins/.ssh` | каталоги создаются с владельцем `jenkins`; том `jenkins_ansible_agent_home` при первом создании наследует эти права |
+| `printf ... > /etc/ssh/sshd_config.d/10-key-only.conf` и `sshd -t` | вход только по ключу, без root, только пользователь `jenkins`; синтаксис проверяется при сборке |
+| `COPY docker/ansible-agent-entrypoint.sh`, `ENTRYPOINT` | сценарий запуска (ниже) |
+
+Пакет `ansible` выбран вместо `ansible-core`: только в нём есть коллекции `ansible.posix`
+(модуль `synchronize`) и `community.general` (модули `composer` и `ini_file`).
+
+Сценарий `docker/ansible-agent-entrypoint.sh`:
+
+1. проверяет переменную `JENKINS_AGENT_SSH_PUBKEY`; если она пуста, выводит ошибку и завершает
+   контейнер с кодом 1;
+2. записывает ключ в `/home/jenkins/.ssh/authorized_keys` с правами `0600` и владельцем `jenkins`;
+3. создаёт `/run/sshd` (без этого каталога sshd не запускается);
+4. запускает `sshd -D -e`.
+
+В `compose.yaml` переменная `JENKINS_ANSIBLE_AGENT_SSH_PUBKEY` из `.env` передаётся в контейнер
+под именем `JENKINS_AGENT_SSH_PUBKEY`. Домашний каталог `/home/jenkins` хранится в томе
+`jenkins_ansible_agent_home`, поэтому `~/.ssh/known_hosts` агента сохраняется при пересоздании
+контейнера.
+
+### 4.2 Ключи и узел
+
+1. Ключевая пара Jenkins → ansible-agent:
+
+   ```
+   ssh-keygen -t ed25519 -N "" -C jenkins-ansible-agent -f secrets/jenkins_ansible_agent_key
+   ```
+
+   Открытый ключ записывается в `.env` как `JENKINS_ANSIBLE_AGENT_SSH_PUBKEY`.
+
+2. Учётные данные `ansible-agent-key`: SSH Username with private key, Username `jenkins`,
+   закрытый ключ `secrets/jenkins_ansible_agent_key`.
+3. Ключ хоста `ansible-agent` уже занесён в `known_hosts` контроллера (раздел 3, шаг 3).
+4. Узел `ansible-agent1`: параметры как у `ssh-agent1`, кроме: Labels `ansible-agent`,
+   Host `ansible-agent`, Credentials `ansible-agent-key`.
+
+Журнал подключения узла (сокращён):
 
 ```
-[10/26/26 07:43:45] [SSH] SSH host key matches key in Known Hosts file. Connection will be allowed.
-[10/26/26 07:43:45] [SSH] Authentication successful.
-...
-[10/26/26 07:43:45] [SSH] Starting sftp client.
-[10/26/26 07:43:45] [SSH] Copying latest remoting.jar...
-[10/26/26 07:43:45] [SSH] Copied 1,418,560 bytes.
-Expanded the channel window size to 4MB
-[10/26/26 07:43:45] [SSH] Starting agent process: cd "/home/jenkins/agent" && java  -jar remoting.jar -workDir /home/jenkins/agent -jar-cache /home/jenkins/agent/remoting/jarCache
-...
-<===[JENKINS REMOTING CAPACITY]===>   channel started
+[10/27/26 09:31:01] [SSH] Opening SSH connection to ansible-agent:22.
+Searching for ansible-agent in /var/jenkins_home/.ssh/known_hosts
+[10/27/26 09:31:01] [SSH] SSH host key matches key in Known Hosts file. Connection will be allowed.
+[10/27/26 09:31:01] [SSH] Authentication successful.
+[10/27/26 09:31:02] [SSH] Copying latest remoting.jar...
+[10/27/26 09:31:02] [SSH] Starting agent process: cd "/home/jenkins/agent" && java  -jar remoting.jar -workDir /home/jenkins/agent -jar-cache /home/jenkins/agent/remoting/jarCache
 Remoting version: 3386.v353e57a_1b_ea_0
-Launcher: SSHLauncher
-Communication Protocol: Standard in/out
-This is a Unix agent
 Agent successfully connected and online
 ```
 
-Время в журналах Jenkins указано в UTC (часовой пояс контейнера контроллера).
+Время в журналах Jenkins указано в UTC (часовой пояс контейнеров).
 
-## 5. Создание pipeline
+Вывод `ansible --version` на агенте (из конвейера `test-server-setup`):
 
-### 5.1 Задание
+```
+ansible [core 2.16.3]
+  config file = /home/jenkins/agent/workspace/test-server-setup/lab05/ansible/ansible.cfg
+  configured module search path = ['/home/jenkins/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
+  ansible python module location = /usr/lib/python3/dist-packages/ansible
+  ansible collection location = /home/jenkins/.ansible/collections:/usr/share/ansible/collections
+  executable location = /usr/bin/ansible
+  python version = 3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0] (/usr/bin/python3)
+  jinja version = 3.1.2
+  libyaml = True
+```
 
-New Item → имя `isbn-tools-pipeline` → тип Pipeline → OK. Раздел Pipeline:
+Строка `config file` подтверждает, что используется `lab05/ansible/ansible.cfg`.
 
-| Поле | Значение |
-|------|----------|
+### 4.3 Настройка Ansible (ansible.cfg)
+
+| Параметр | Значение | Зачем |
+|----------|----------|-------|
+| `inventory` | `hosts.ini` | инвентарь не нужно указывать в командной строке |
+| `host_key_checking` | `True` | ключ хоста `test-server` проверяется по `~/.ssh/known_hosts`; значение по умолчанию записано явно |
+| `interpreter_python` | `/usr/bin/python3` | без автоматического поиска интерпретатора и предупреждения о нём |
+| `retry_files_enabled` | `False` | файлы `*.retry` не создаются в рабочем каталоге |
+| `deprecation_warnings` | `True` | предупреждения об устаревших возможностях не скрываются |
+| `become_method`, `become_user` | `sudo`, `root` | повышение привилегий для `become: true` |
+
+Закрытый ключ в `ansible.cfg` и `hosts.ini` намеренно не указан. Он хранится в учётных данных
+Jenkins и передаётся параметром `--private-key` (раздел 7.2).
+
+## 5. Тестовый сервер
+
+### 5.1 Dockerfile.test_server
+
+| Инструкция | Назначение |
+|------------|------------|
+| `FROM ubuntu:24.04` | в Ubuntu 22.04 есть только PHP 8.1, а `isbn-tools` требует `php >=8.2`; в 24.04 PHP 8.3 |
+| `apt-get install ... openssh-server sudo python3` | sshd для Ansible, sudo для `become`, python3 для модулей Ansible |
+| `useradd --create-home --shell /bin/bash ansible` | пользователь `ansible` без пароля; вход только по ключу |
+| `/etc/sudoers.d/ansible` + `visudo -cf` | `ansible ALL=(ALL) NOPASSWD:ALL`, права `0440`; файл проверяется при сборке |
+| `10-key-only.conf` + `sshd -t` | `PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `PermitRootLogin no`, `AllowUsers ansible` |
+| `EXPOSE 22 80`, `ENTRYPOINT` | SSH для Ansible, HTTP для сайта |
+
+Apache и PHP в образ не входят: их устанавливает плейбук.
+
+Сценарий `docker/test-server-entrypoint.sh` устроен так же, как у агента (переменная
+`ANSIBLE_SSH_PUBKEY`, владелец ключа `ansible`), и дополнительно запускает Apache, если он уже
+установлен:
+
+```
+if [ -x /etc/init.d/apache2 ]; then
+    service apache2 start
+fi
+```
+
+В контейнере нет systemd, поэтому `enabled: true` в задаче `service` не запускает Apache после
+перезапуска контейнера; эту роль выполняет сценарий запуска. Проверка:
+
+```
+$ docker compose restart test-server
+$ docker logs --tail 4 test-server
+ * Starting Apache httpd web server apache2
+Server listening on 0.0.0.0 port 22.
+$ curl -s 'http://localhost:8081/?isbn=978-3-16-148410-0' | grep -E 'ISBN-1[03]<'
+        <tr><th>ISBN-13</th><td>9783161484100</td></tr>
+        <tr><th>ISBN-10</th><td>316148410X</td></tr>
+```
+
+Без ключа контейнер не запускается:
+
+```
+$ docker run --rm lab05-test-server
+Ошибка: переменная ANSIBLE_SSH_PUBKEY не задана.
+```
+
+### 5.2 Ключи
+
+1. Ключевая пара ansible-agent → test-server:
+
+   ```
+   ssh-keygen -t ed25519 -N "" -C ansible-test-server -f secrets/ansible_test_server_key
+   ```
+
+   Открытый ключ записывается в `.env` как `ANSIBLE_TEST_SERVER_SSH_PUBKEY`; в контейнер он
+   передаётся как `ANSIBLE_SSH_PUBKEY`.
+
+2. Учётные данные `ansible-test-server-key`: SSH Username with private key, Username `ansible`,
+   закрытый ключ `secrets/ansible_test_server_key`.
+
+3. Ключ хоста `test-server` один раз заносится в `known_hosts` агента и сверяется с ключом сервера:
+
+   ```
+   $ docker compose exec -u jenkins ansible-agent sh -c 'ssh-keyscan -t ed25519 test-server >> ~/.ssh/known_hosts'
+   $ docker compose exec -u jenkins ansible-agent ssh-keygen -lf /home/jenkins/.ssh/known_hosts
+   256 SHA256:IZPqCeo7D1Oqo2UwtQLiYYz/RFfUt2hEA5mGzCs5z54 test-server (ED25519)
+   $ docker compose exec test-server ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+   256 SHA256:IZPqCeo7D1Oqo2UwtQLiYYz/RFfUt2hEA5mGzCs5z54 root@buildkitsandbox (ED25519)
+   ```
+
+   При первом подключении OpenSSH (параметр `UpdateHostKeys`) сам добавляет в `known_hosts`
+   ключи RSA и ECDSA того же сервера в хешированном виде; это штатное поведение клиента.
+
+   Ключи хоста `test-server` созданы при сборке образа, поэтому они не меняются при пересоздании
+   контейнера (это проверено в разделе 8.1, пункт 4) и меняются только после пересборки образа.
+   После пересборки шаг повторяется.
+
+### 5.3 Инвентарь hosts.ini
+
+```ini
+[test_servers]
+test-server ansible_host=test-server ansible_port=22 ansible_user=ansible
+```
+
+Имя хоста совпадает с именем сервиса в `compose.yaml`; его разрешает DNS сети `jenkins-network`.
+
+## 6. Плейбук setup_test_server.yml
+
+Один play для группы `test_servers` с `become: true`. Переменные: `app_name: isbn-tools`,
+`app_root: /var/www/isbn-tools`, `server_name: test-server`, `php_version: "8.3"`.
+
+| № | Задача | Модуль | Зачем |
+|---|--------|--------|-------|
+| 1 | Установить пакеты Apache, PHP и Composer | `ansible.builtin.apt` | `apache2`, `libapache2-mod-php`, `php-cli`, `php-mbstring`, `composer`, `unzip`, `rsync`; `update_cache` не чаще раза в час (`cache_valid_time: 3600`) |
+| 2 | Задать ServerName для всего сервера | `ansible.builtin.copy` | файл `conf-available/servername.conf` со строкой `ServerName test-server` |
+| 3 | Включить конфигурацию servername | `ansible.builtin.command` | `a2enconf servername`, `creates:` делает задачу идемпотентной |
+| 4 | Создать каталог public проекта | `ansible.builtin.file` | `/var/www/isbn-tools/public`, владелец `root`, группа `www-data`, `0755` |
+| 5 | Создать виртуальный хост isbn-tools | `ansible.builtin.template` | `sites-available/isbn-tools.conf` из шаблона |
+| 6 | Включить сайт isbn-tools | `ansible.builtin.command` | `a2ensite isbn-tools`, `creates:` |
+| 7 | Отключить сайт по умолчанию | `ansible.builtin.command` | `a2dissite 000-default`, `removes:` |
+| 8 | Отключить expose_php в php.ini модуля Apache | `community.general.ini_file` | версия PHP не передаётся в заголовке `X-Powered-By` |
+| 9 | Запустить Apache | `ansible.builtin.service` | `state: started`; после установки пакета Apache не запущен |
+
+Пакеты: `libapache2-mod-php` подключает PHP к Apache; `php-mbstring` нужен для нормализации
+ввода и Composer; `composer` и `unzip` нужны при развёртывании; `rsync` нужен модулю
+`synchronize` на стороне сервера.
+
+Задача 8 в обоих запусках показала `ok`: в `/etc/php/8.3/apache2/php.ini` Ubuntu значение уже
+`expose_php = Off` (в `cli/php.ini` оно `On`). Задача оставлена: она фиксирует требуемое значение
+явно и вернёт его, если файл будет изменён.
+
+Обработчики (handlers), оба подписаны на событие `apache config changed`:
+
+1. `Проверить конфигурацию Apache`: `apache2ctl configtest`, `changed_when: false`;
+2. `Перезагрузить Apache`: `service: state=reloaded`.
+
+Обработчики выполняются в порядке объявления, поэтому перезагрузка происходит только после
+успешной проверки синтаксиса. Если `configtest` завершится ошибкой, play остановится и Apache
+продолжит работать со старой конфигурацией.
+
+Шаблон `templates/isbn-tools.conf.j2`:
+
+```apache
+# {{ ansible_managed }}
+# Виртуальный хост проекта {{ app_name }}.
+<VirtualHost *:80>
+    ServerName {{ server_name }}
+    DocumentRoot {{ app_root }}/public
+
+    <Directory {{ app_root }}/public>
+        Require all granted
+        AllowOverride None
+        DirectoryIndex index.php
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/{{ app_name }}_error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ app_name }}_access.log combined
+</VirtualHost>
+```
+
+Первый успешный запуск (сборка #2 задания `test-server-setup`):
+
+```
+09:34:13  PLAY [Настроить тестовый сервер для isbn-tools] ********************************
+09:34:13  TASK [Gathering Facts] *********************************************************
+09:34:16  ok: [test-server]
+09:34:16  TASK [Установить пакеты Apache, PHP и Composer] ********************************
+09:35:24  changed: [test-server]
+...
+09:35:34  RUNNING HANDLER [Проверить конфигурацию Apache] ********************************
+09:35:34  ok: [test-server]
+09:35:34  RUNNING HANDLER [Перезагрузить Apache] *****************************************
+09:35:35  changed: [test-server]
+09:35:35  PLAY RECAP *********************************************************************
+09:35:35  test-server                : ok=12   changed=9    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+Повторный запуск без изменений (сборка #3):
+
+```
+09:36:36  PLAY RECAP *********************************************************************
+09:36:36  test-server                : ok=10   changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+Во втором запуске ни одна задача не изменила сервер, поэтому обработчики не вызывались
+(`ok=10` вместо `ok=12`).
+
+## 7. Конвейеры
+
+Все три задания создаются одинаково: **New Item → Pipeline**, раздел **Pipeline**:
+
+| Параметр | Значение |
+|----------|----------|
 | Definition | Pipeline script from SCM |
 | SCM | Git |
 | Repository URL | `https://github.com/USM-Labs/automation.git` |
-| Credentials | none (репозиторий публичный) |
-| Branch Specifier | `*/lab04` |
-| Script Path | `lab04/Jenkinsfile` |
-| Lightweight checkout | включено |
+| Branch Specifier | `*/main` (пока ветка lab05 не была слита: `*/lab05`) |
+| Script Path | `lab05/pipelines/<файл>.groovy` |
 
-После слияния ветки `lab04` в `main` Branch Specifier меняется на `*/main`.
+| Задание | Script Path | Агент |
+|---------|-------------|-------|
+| `isbn-tools-build` | `lab05/pipelines/php_build_and_test_pipeline.groovy` | `php-agent` |
+| `test-server-setup` | `lab05/pipelines/ansible_setup_pipeline.groovy` | `ansible-agent` |
+| `isbn-tools-deploy` | `lab05/pipelines/php_deploy_pipeline.groovy` | `ansible-agent` |
 
-Jenkinsfile читается контроллером из репозитория, а исходники проекта получает агент:
-стадия `Declarative: Checkout SCM` выполняется на узле `ssh-agent1`.
+Общие опции всех конвейеров: `skipDefaultCheckout()` (репозиторий клонируется явной стадией
+`Checkout` с шагом `checkout scm`), `timestamps()`, `timeout(time: 15, unit: 'MINUTES')`.
 
-### 5.2 Jenkinsfile
+Порядок запуска: `isbn-tools-build` → `test-server-setup` → `isbn-tools-deploy`.
+Из выводов ниже убраны строки `[Pipeline]` и служебные строки git.
 
-Каркас из задания сохранён: агент с меткой `php-agent`, две стадии, блок `post` с
-сообщениями `always`, `success` и `failure`. Добавлено:
+### 7.1 Сборка и тестирование (php_build_and_test_pipeline.groovy)
 
-| Элемент | Назначение |
-|---------|------------|
-| `options { timestamps() }` | время у каждой строки журнала (плагин Timestamper) |
-| `options { timeout(time: 10, unit: 'MINUTES') }` | прерывание зависшей сборки через 10 минут |
-| `environment { PROJECT_DIR = 'lab04/isbn-tools' }` | каталог проекта задаётся в одном месте |
-| `dir("${PROJECT_DIR}")` | команды выполняются в каталоге проекта |
+Файл получен из `Jenkinsfile` lab04: добавлены стадии `Checkout` и `Report`, путь проекта
+изменён на `lab05/isbn-tools`.
 
-Стадия **Install Dependencies**:
+| Стадия | Действия |
+|--------|----------|
+| `Checkout` | `checkout scm` |
+| `Install Dependencies` | `php --version`, `composer --version`, `composer validate --strict`, `composer install --no-interaction --no-progress --prefer-dist` |
+| `Test` | `vendor/bin/phpunit --log-junit build/junit.xml` |
+| `Report` | `junit testResults: "${PROJECT_DIR}/build/junit.xml"` |
 
-1. `php --version` и `composer --version` записывают в журнал версии окружения агента.
-2. `composer validate --strict` проверяет `composer.json` и соответствие ему
-   `composer.lock`; любое предупреждение считается ошибкой.
-3. `composer install --no-interaction --no-progress --prefer-dist` устанавливает
-   зависимости строго по `composer.lock`, без вопросов и без индикатора прогресса.
+Отчёт публикуется без `allowEmptyResults`: если файл отчёта не создан, стадия `Report`
+завершается ошибкой.
 
-Стадия **Test**: `vendor/bin/phpunit --log-junit build/junit.xml` запускает тесты из
-`phpunit.xml.dist` и сохраняет отчёт в формате JUnit. Каталог `build/` PHPUnit создаёт сам.
-
-Блок **post**: в `always` шаг `junit` публикует `build/junit.xml` (страница Tests
-сборки), `allowEmptyResults: true` не даёт шагу завершиться ошибкой, если стадия Test не
-дошла до запуска тестов; затем выводится `Pipeline completed.`. В `success` и `failure`
-выводятся сообщения из задания.
-
-## 6. Результат выполнения
-
-Сборка запускается кнопкой Build Now. Журнал сборки №1 (Console Output, сокращено:
-строки получения исходников из Git и часть строк загрузки пакетов заменены на `...`):
+Сборка #1 (сокращено):
 
 ```
-Started by user Splavski Maxim
-...
-[Pipeline] Start of Pipeline
-[Pipeline] node
-Running on ssh-agent1 in /home/jenkins/agent/workspace/isbn-tools-pipeline
-[Pipeline] {
-[Pipeline] stage
-[Pipeline] { (Declarative: Checkout SCM)
-[Pipeline] checkout
-...
-Commit message: "ci(lab04): add Jenkinsfile for php-agent pipeline"
-First time build. Skipping changelog.
-[Pipeline] }
-[Pipeline] // stage
-[Pipeline] withEnv
-[Pipeline] {
-[Pipeline] withEnv
-[Pipeline] {
-[Pipeline] timestamps
-[Pipeline] {
-[Pipeline] timeout
-[2026-10-26T07:44:19.722Z] Timeout set to expire in 10 min
-[Pipeline] {
-[Pipeline] stage
-[Pipeline] { (Install Dependencies)
-[Pipeline] echo
-[2026-10-26T07:44:19.765Z] Preparing project...
-[Pipeline] dir
-[2026-10-26T07:44:19.776Z] Running in /home/jenkins/agent/workspace/isbn-tools-pipeline/lab04/isbn-tools
-[Pipeline] {
-[Pipeline] sh
-...
-[2026-10-26T07:44:20.118Z] + php --version
-[2026-10-26T07:44:20.118Z] PHP 8.2.35 (cli) (built: Oct 21 2026 06:29:51) (NTS)
-[2026-10-26T07:44:20.118Z] Copyright (c) The PHP Group
-[2026-10-26T07:44:20.118Z] Zend Engine v4.2.35, Copyright (c) Zend Technologies
-[2026-10-26T07:44:20.118Z]     with Zend OPcache v8.2.35, Copyright (c), by Zend Technologies
-[Pipeline] sh
-[2026-10-26T07:44:20.404Z] + composer --version
-[2026-10-26T07:44:20.404Z] Composer version 2.10.3 2026-08-27 13:34:23
-[2026-10-26T07:44:20.404Z] PHP version 8.2.35 (/usr/bin/php8.2)
-[2026-10-26T07:44:20.404Z] Run the "diagnose" command to get more detailed diagnostics output.
-[Pipeline] sh
-[2026-10-26T07:44:20.698Z] + composer validate --strict
-[2026-10-26T07:44:20.698Z] ./composer.json is valid
-[Pipeline] sh
-[2026-10-26T07:44:20.971Z] + composer install --no-interaction --no-progress --prefer-dist
-[2026-10-26T07:44:20.971Z] Installing dependencies from lock file (including require-dev)
-[2026-10-26T07:44:20.971Z] Verifying lock file contents can be installed on current platform.
-[2026-10-26T07:44:21.224Z] Package operations: 27 installs, 0 updates, 0 removals
-[2026-10-26T07:44:21.225Z]   - Downloading staabm/side-effects-detector (1.0.5)
-...
-[2026-10-26T07:44:39.141Z]   - Installing phpunit/phpunit (11.5.57): Extracting archive
-[2026-10-26T07:44:39.394Z] Generating autoload files
-[2026-10-26T07:44:39.394Z] 25 packages you are using are looking for funding.
-[2026-10-26T07:44:39.394Z] Use the `composer fund` command to find out more!
-[Pipeline] }
-[Pipeline] // dir
-[Pipeline] }
-[Pipeline] // stage
-[Pipeline] stage
-[Pipeline] { (Test)
-[Pipeline] echo
-[2026-10-26T07:44:39.465Z] Running tests...
-[Pipeline] dir
-[2026-10-26T07:44:39.470Z] Running in /home/jenkins/agent/workspace/isbn-tools-pipeline/lab04/isbn-tools
-[Pipeline] {
-[Pipeline] sh
-[2026-10-26T07:44:39.751Z] + vendor/bin/phpunit --log-junit build/junit.xml
-[2026-10-26T07:44:39.751Z] PHPUnit 11.5.57 by Sebastian Bergmann and contributors.
-[2026-10-26T07:44:39.751Z] 
-[2026-10-26T07:44:39.751Z] Runtime:       PHP 8.2.35
-[2026-10-26T07:44:39.751Z] Configuration: /home/jenkins/agent/workspace/isbn-tools-pipeline/lab04/isbn-tools/phpunit.xml.dist
-[2026-10-26T07:44:39.751Z] 
-[2026-10-26T07:44:39.751Z] .......................                                           23 / 23 (100%)
-[2026-10-26T07:44:39.751Z] 
-[2026-10-26T07:44:39.751Z] Time: 00:00.002, Memory: 8.00 MB
-[2026-10-26T07:44:39.751Z] 
-[2026-10-26T07:44:39.752Z] OK (23 tests, 26 assertions)
-[Pipeline] }
-[Pipeline] // dir
-[Pipeline] }
-[Pipeline] // stage
-[Pipeline] stage
-[Pipeline] { (Declarative: Post Actions)
-[Pipeline] junit
-[2026-10-26T07:44:39.850Z] Recording test results
-[2026-10-26T07:44:40.356Z] [Checks API] No suitable checks publisher found.
-[Pipeline] echo
-[2026-10-26T07:44:40.388Z] Pipeline completed.
-[Pipeline] echo
-[2026-10-26T07:44:40.404Z] All stages completed successfully!
-[Pipeline] }
-[Pipeline] // stage
-[Pipeline] }
-[Pipeline] // timeout
-[Pipeline] }
-[Pipeline] // timestamps
-[Pipeline] }
-[Pipeline] // withEnv
-[Pipeline] }
-[Pipeline] // withEnv
-[Pipeline] }
-[Pipeline] // node
-[Pipeline] End of Pipeline
+Running on ssh-agent1 in /home/jenkins/agent/workspace/isbn-tools-build
+09:32:13  Timeout set to expire in 15 min
+09:32:21  Preparing project...
+09:32:22  + php --version
+09:32:23  PHP 8.2.35 (cli) (built: Oct 21 2026 06:29:51) (NTS)
+09:32:24  + composer validate --strict
+09:32:25  ./composer.json is valid
+09:32:26  + composer install --no-interaction --no-progress --prefer-dist
+09:32:26  Verifying lock file contents can be installed on current platform.
+09:32:27  Package operations: 27 installs, 0 updates, 0 removals
+09:32:50    - Installing phpunit/phpunit (11.5.57): Extracting archive
+09:32:50  Generating autoload files
+09:32:51  Running tests...
+09:32:52  + vendor/bin/phpunit --log-junit build/junit.xml
+09:32:52  PHPUnit 11.5.57 by Sebastian Bergmann and contributors.
+09:32:52  Runtime:       PHP 8.2.35
+09:32:52  .......................                                           23 / 23 (100%)
+09:32:52  OK (23 tests, 26 assertions)
+09:32:53  Recording test results
+09:32:56  Pipeline completed.
+09:32:57  All stages completed successfully!
 Finished: SUCCESS
 ```
 
-На странице сборки №1 отображается ссылка `Tests (no failures)`. Страница Tests,
-сформированная шагом `junit`, сообщает `All 23 tests are passing!`: 23 теста пройдено,
-0 ошибок, 0 пропущено.
+На странице сборки ссылка **Tests (no failures)**: 23 пройдено, 0 ошибок, 0 пропущено.
 
-## 7. Ответы на вопросы
+### 7.2 Настройка тестового сервера (ansible_setup_pipeline.groovy)
 
-### 7.1 Преимущества Jenkins для автоматизации задач DevOps
-
-1. **Конвейер как код.** Jenkinsfile хранится в репозитории вместе с проектом, поэтому
-   изменения конвейера проходят ту же историю версий и ревью, что и код.
-2. **Распределённое выполнение.** Контроллер только планирует задания и хранит
-   результаты, а сборки выполняются на агентах в отдельных окружениях с нужными
-   инструментами (здесь: PHP 8.2 и Composer только в образе агента).
-3. **Экосистема плагинов.** Более тысячи плагинов подключают системы контроля версий,
-   способы запуска агентов, отчёты тестов и уведомления без собственной разработки.
-4. **Собственный сервер и открытый код.** Jenkins распространяется по лицензии MIT и
-   разворачивается на своей инфраструктуре, без ограничений поставщика на минуты сборки.
-5. **Воспроизводимость и аудит.** Для каждой сборки сохраняются журнал, ревизия
-   исходников, результаты тестов и время выполнения, поэтому любую сборку можно разобрать
-   и повторить.
-
-### 7.2 Типы агентов Jenkins
-
-Агенты различаются по двум признакам: по времени жизни и по способу подключения
-к контроллеру.
-
-**(а) По времени жизни**
-
-| Тип | Описание |
-|-----|----------|
-| Постоянный агент (Permanent Agent) | узел создаётся вручную и существует постоянно; так настроен `ssh-agent1` |
-| Облачный (временный) агент | создаётся под конкретную сборку и удаляется после неё; плагины Docker, Kubernetes, Amazon EC2 |
-| Встроенный узел (Built-In Node) | исполнители на самом контроллере; для сборок не рекомендуется, так как сборка получает доступ к файлам контроллера |
-
-**(б) По способу подключения**
-
-| Способ | Описание |
+| Стадия | Действия |
 |--------|----------|
-| SSH (Launch agents via SSH) | соединение открывает контроллер: он входит на машину агента по ключу, копирует туда `remoting.jar` и стартует процесс агента; этот способ выбран для `ssh-agent1` |
-| Входящий агент (inbound) | направление обратное: процесс на машине агента устанавливает связь с контроллером, либо через отдельный TCP-порт (по умолчанию 50000, он опубликован в `docker-compose.yml`), либо по WebSocket через основной HTTP-порт |
-| Служба Windows | входящий агент, установленный как служба Windows |
-| Запуск командой (command launcher) | контроллер запускает агент произвольной командой на своей стороне |
+| `Checkout` | `checkout scm` |
+| `Run Playbook` | в каталоге `lab05/ansible`: `ansible --version`; внутри `withCredentials`: `ansible-playbook setup_test_server.yml --syntax-check`, затем `ansible-playbook setup_test_server.yml --private-key "$ANSIBLE_KEY"` |
 
-### 7.3 Проблемы и решения
+```groovy
+withCredentials([sshUserPrivateKey(credentialsId: 'ansible-test-server-key', keyFileVariable: 'ANSIBLE_KEY')]) {
+    sh 'ansible-playbook setup_test_server.yml --syntax-check'
+    sh 'ansible-playbook setup_test_server.yml --private-key "$ANSIBLE_KEY"'
+}
+```
 
-| № | Проблема | Причина | Решение |
-|---|----------|---------|---------|
-| 1 | `composer install` в образе из задания (только `apt-get install -y php-cli`, Composer добавлен отдельно) завершается ошибкой: `phpunit/phpunit 11.5.57 requires ext-dom * -> it is missing from your system. Install or enable PHP's dom extension.`, для `sebastian/exporter 6.3.2`: `requires ext-mbstring *` | пакет `php-cli` в Debian не содержит расширений dom, xml, xmlwriter и mbstring, которые требует PHPUnit; в образе также нет `unzip` | в `Dockerfile` добавлены пакеты `php-xml`, `php-mbstring` и `unzip` |
-| 2 | узел `ssh-agent1` не подключается, в журнале: `[SSH] No Known Hosts file was found at /var/jenkins_home/.ssh/known_hosts. Please ensure one is created at this path and that Jenkins can read it.` и `Key exchange was not finished, connection is closed.` | узел создан со стратегией Known hosts file до того, как в контроллере появился файл `known_hosts` | выполнена команда `ssh-keyscan` из раздела 4.2; при следующей попытке: `SSH host key matches key in Known Hosts file. Connection will be allowed.` |
-| 3 | после пересоздания контейнера `ssh-agent` узел отключился (`Connection was broken`), повторный запуск: `[SSH] The SSH key presented by the remote host does not match the key saved in the Known Hosts file against this host. Connections to this host will be denied until the two keys match.` | образ `jenkins/ssh-agent` генерирует новые ключи хоста при создании контейнера, старая запись в `known_hosts` больше не совпадает | удалена старая запись и добавлена новая: `docker exec jenkins-controller sh -c 'ssh-keygen -R ssh-agent -f ~/.ssh/known_hosts && ssh-keyscan -H ssh-agent >> ~/.ssh/known_hosts'`, после чего узел подключился (`Agent successfully connected and online`) |
-| 4 | `composer require --dev phpunit/phpunit:^12` в образе агента: `phpunit/phpunit[12.5.8, ..., 12.5.40] require php >=8.3 -> your php version (8.2.35) does not satisfy that requirement.` | в Debian 12 (bookworm) PHP 8.2, а PHPUnit 12 требует PHP 8.3 | в `composer.json` указан PHPUnit `^11.5` |
+`withCredentials` создаёт временный файл с закрытым ключом и удаляет его после выполнения блока.
+Команды записаны в одинарных кавычках: переменную `$ANSIBLE_KEY` раскрывает оболочка, а не Groovy,
+поэтому путь к ключу не попадает в текст скрипта. В журнале путь заменён на `****`.
 
-Кроме того, порт 8080 на моей машине занят контейнером `php_apache`; это учтено в разделе
-«Требования».
+Сборка #2 (сокращено, полный список задач в разделе 6):
+
+```
+09:34:10  + ansible --version
+09:34:10  ansible [core 2.16.3]
+09:34:11  + ansible-playbook setup_test_server.yml --syntax-check
+09:34:12  playbook: setup_test_server.yml
+09:34:12  + ansible-playbook setup_test_server.yml --private-key ****
+09:34:13  PLAY [Настроить тестовый сервер для isbn-tools] ********************************
+...
+09:35:35  test-server                : ok=12   changed=9    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+09:35:35  Test server configured successfully.
+Finished: SUCCESS
+```
+
+Сборка #1 этого задания завершилась ошибкой до того, как ключ `test-server` был занесён в
+`known_hosts` агента (раздел 8.3, проблема 1).
+
+### 7.3 Развёртывание (php_deploy_pipeline.groovy)
+
+| Стадия | Действия |
+|--------|----------|
+| `Checkout` | `checkout scm` |
+| `Copy Files` | `ansible-playbook deploy_isbn_tools.yml --syntax-check`, затем `--tags copy` |
+| `Configure` | `ansible-playbook deploy_isbn_tools.yml --tags configure` |
+
+Обе стадии работают в `lab05/ansible` внутри `withCredentials` с тем же ключом
+`ansible-test-server-key`. Теги плейбука соответствуют стадиям один к одному; без тегов плейбук
+выполняет развёртывание полностью.
+
+Задачи `deploy_isbn_tools.yml`:
+
+| Тег | Задача | Модуль | Параметры |
+|-----|--------|--------|-----------|
+| `copy` | Скопировать файлы проекта на сервер | `ansible.posix.synchronize` | `delete: true`; `verify_host: true`; `owner: false`, `group: false`; `--chmod=D755,F644`; исключены `tests/`, `vendor/`, `build/`, `.phpunit.cache/`, `phpunit.xml.dist` |
+| `configure` | Установить зависимости Composer без dev-пакетов | `community.general.composer` | `command: install`, `no_dev: true`, `optimize_autoloader: true` (из `composer.lock`) |
+| `configure` | Назначить владельца, группу и права файлов проекта | `ansible.builtin.file` | `recurse: true`, `root:www-data`, `u=rwX,g=rX,o=rX` |
+| `configure` | Запросить страницу с проверочным номером | `ansible.builtin.uri` | `http://localhost/?isbn=0306406152` |
+| `configure` | Убедиться, что страница вернула ISBN-13 | `ansible.builtin.assert` | в ответе есть `9780306406157` |
+
+Каталог `vendor/` на сервере исключён из синхронизации, поэтому `delete: true` его не удаляет:
+rsync не удаляет на приёмнике исключённые пути без `--delete-excluded`. Это видно по повторным
+запускам: `vendor/` остаётся на месте, задача Composer показывает `ok`.
+
+Задача Composer показывает `ok` и на чистом сервере. У `isbn-tools` нет зависимостей времени
+выполнения (только `php >=8.2`), поэтому `composer install --no-dev` не устанавливает пакеты,
+а только создаёт `vendor/autoload.php`; модуль считает изменением только установку пакетов.
+Что автозагрузка работает, подтверждают две последние задачи: страница вызывает класс `Isbn`.
+
+Сборка #5 (после пересоздания контейнера сервера, раздел 8.1, пункт 4; сокращено):
+
+```
+Running on ansible-agent1 in /home/jenkins/agent/workspace/isbn-tools-deploy
+09:43:44  + ansible-playbook deploy_isbn_tools.yml --syntax-check
+09:43:46  playbook: deploy_isbn_tools.yml
+09:43:46  + ansible-playbook deploy_isbn_tools.yml --tags copy --private-key ****
+09:43:51  TASK [Скопировать файлы проекта на сервер] *************************************
+09:43:51  [DEPRECATION WARNING]: The connection's stdin object is deprecated. Call
+09:43:51  display.prompt_until(msg) instead. This feature will be removed in version
+09:43:51  2.19. Deprecation warnings can be disabled by setting
+09:43:51  deprecation_warnings=False in ansible.cfg.
+09:43:52  changed: [test-server]
+09:43:52  test-server                : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+09:43:53  + ansible-playbook deploy_isbn_tools.yml --tags configure --private-key ****
+09:43:56  TASK [Установить зависимости Composer без dev-пакетов] *************************
+09:43:57  ok: [test-server]
+09:43:57  TASK [Назначить владельца, группу и права файлов проекта] **********************
+09:43:59  changed: [test-server]
+09:44:00  TASK [Убедиться, что страница вернула ISBN-13] *********************************
+09:44:00  ok: [test-server] => {
+09:44:00      "changed": false,
+09:44:00      "msg": "Страница вернула 9780306406157."
+09:44:00  }
+09:44:00  test-server                : ok=5    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+09:44:01  isbn-tools deployed successfully.
+Finished: SUCCESS
+```
+
+Повторное развёртывание без изменений в проекте (сборка #4): в обеих стадиях `changed=0`.
+
+```
+09:40:01  test-server                : ok=2    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+09:40:15  test-server                : ok=5    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+Права на сервере после развёртывания:
+
+```
+$ docker compose exec test-server ls -la /var/www/isbn-tools
+drwxr-xr-x 5 root www-data  4096 Oct 27 09:43 .
+-rw-r--r-- 1 root www-data   641 Oct 27 09:36 composer.json
+-rw-r--r-- 1 root www-data 65513 Oct 27 09:36 composer.lock
+drwxr-xr-x 2 root www-data  4096 Oct 27 09:36 public
+drwxr-xr-x 2 root www-data  4096 Oct 27 09:36 src
+drwxr-xr-x 3 root www-data  4096 Oct 27 09:43 vendor
+```
+
+Тестов, `phpunit.xml.dist` и dev-пакетов на сервере нет.
+
+### 7.4 Проверка развёрнутого проекта
+
+Страница открывается в браузере по адресу `http://localhost:8081/`. Проверка из командной строки:
+
+```
+$ curl -s 'http://localhost:8081/?isbn=0-306-40615-2' | grep -E '<title>|<tr>'
+    <title>isbn-tools: проверка ISBN</title>
+        <tr><th>Введено</th><td>0-306-40615-2</td></tr>
+        <tr><th>ISBN-13</th><td>9780306406157</td></tr>
+        <tr><th>ISBN-10</th><td>0306406152</td></tr>
+        <tr><th>Статус</th><td class="ok">номер корректен</td></tr>
+
+$ curl -s 'http://localhost:8081/?isbn=979-10-90636-07-1' | grep -E '<tr>'
+        <tr><th>Введено</th><td>979-10-90636-07-1</td></tr>
+        <tr><th>ISBN-13</th><td>9791090636071</td></tr>
+        <tr><th>ISBN-10</th><td>нет: префикс 979</td></tr>
+        <tr><th>Статус</th><td class="ok">номер корректен</td></tr>
+
+$ curl -si 'http://localhost:8081/?isbn=0-306-40615-3' | grep -E 'HTTP/|X-Powered|Server:|class="error"'
+HTTP/1.1 422 Unprocessable Entity
+Server: Apache/2.4.58 (Ubuntu)
+    <p class="error">Номер ISBN &quot;0-306-40615-3&quot; имеет неверную контрольную цифру.</p>
+
+$ curl -s 'http://localhost:8081/?isbn=12345' | grep error
+    <p class="error">Номер ISBN &quot;12345&quot; должен содержать 10 или 13 символов.</p>
+```
+
+Заголовка `X-Powered-By` в ответе нет (задача 8 плейбука). Неверный номер возвращает код `422`,
+кавычки в сообщении экранированы.
+
+## 8. Ответы на вопросы
+
+### 8.1 Преимущества Ansible для настройки серверов
+
+1. **Идемпотентность.** Модули описывают требуемое состояние, а не последовательность команд.
+   Повторный запуск `setup_test_server.yml` на настроенном сервере дал `changed=0` (раздел 6),
+   повторное развёртывание тоже `changed=0` (раздел 7.3). Для `command` то же поведение
+   обеспечивают `creates:` и `removes:`.
+
+2. **Без агента на сервере.** На управляемом сервере нужны только sshd, python3 и sudo: образ
+   `test-server` содержит ровно это и занимает 215 МБ. Для сравнения, агенту Jenkins нужны
+   Java 21 и процесс `remoting.jar`; образ `ansible-agent` с Java и Ansible занимает 1,31 ГБ.
+   Ansible подключается по SSH, отдельной службы и дополнительных портов на сервере нет.
+
+3. **Пробный запуск.** `--check --diff` показывает изменения, ничего не меняя. Пробный запуск с
+   изменённым в шаблоне `AllowOverride None` на `AllowOverride FileInfo`:
+
+   ```
+   TASK [Создать виртуальный хост isbn-tools] *************************************
+   --- before: /etc/apache2/sites-available/isbn-tools.conf
+   -        AllowOverride None
+   +        AllowOverride FileInfo
+   changed: [test-server]
+   ```
+
+   После пробного запуска в файле на сервере осталось `AllowOverride None`.
+
+4. **Восстановление сервера тем же плейбуком.** Контейнер сервера пересоздан с нуля:
+
+   ```
+   $ docker compose up -d --force-recreate --no-deps test-server
+   $ curl -sS http://localhost:8081/
+   curl: (56) Recv failure: Connection reset by peer
+   ```
+
+   Apache и сайта в новом контейнере нет. После запуска `test-server-setup` (сборка #4) и
+   `isbn-tools-deploy` (сборка #5):
+
+   ```
+   test-server                : ok=12   changed=9    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+   test-server                : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+   test-server                : ok=5    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+   $ curl -s 'http://localhost:8081/?isbn=0-306-40615-2' | grep 'ISBN-13<'
+           <tr><th>ISBN-13</th><td>9780306406157</td></tr>
+   ```
+
+   Сервер восстановлен за две сборки без ручных действий. Повторно сканировать ключ хоста не
+   пришлось: образ не пересобирался, ключи хоста те же.
+
+### 8.2 Другие модули Ansible для управления конфигурацией
+
+Столбец «Коллекция» показывает, что входит в `ansible-core`, а что требует полного пакета
+`ansible` (или установки коллекции через `ansible-galaxy`). Отметка «да» означает, что модуль
+использован в этой работе.
+
+| Область | Модуль (FQCN) | Коллекция | Назначение | Здесь |
+|---------|---------------|-----------|------------|-------|
+| Пакеты | `ansible.builtin.apt` | ansible-core | пакеты Debian и Ubuntu | да |
+| | `ansible.builtin.package` | ansible-core | пакеты через менеджер ОС, без привязки к дистрибутиву | |
+| | `ansible.builtin.dnf` | ansible-core | пакеты RHEL, Fedora | |
+| Файлы | `ansible.builtin.copy` | ansible-core | копирование файла или содержимого | да |
+| | `ansible.builtin.template` | ansible-core | файл из шаблона Jinja2 | да |
+| | `ansible.builtin.lineinfile` | ansible-core | одна строка в файле | |
+| | `ansible.builtin.blockinfile` | ansible-core | блок строк с маркерами | |
+| | `ansible.builtin.file` | ansible-core | каталоги, права, владельцы, ссылки | да |
+| | `community.general.ini_file` | community.general | параметр в INI-файле | да |
+| Службы | `ansible.builtin.service` | ansible-core | запуск, остановка, перезагрузка служб | да |
+| | `ansible.builtin.systemd_service` | ansible-core | службы systemd, `daemon_reload` | |
+| Пользователи | `ansible.builtin.user` | ansible-core | учётные записи | |
+| | `ansible.builtin.group` | ansible-core | группы | |
+| | `ansible.posix.authorized_key` | ansible.posix | ключи в `authorized_keys` | |
+| Развёртывание | `ansible.posix.synchronize` | ansible.posix | rsync между хостами | да |
+| | `ansible.builtin.git` | ansible-core | клонирование репозитория на сервер | |
+| | `ansible.builtin.unarchive` | ansible-core | распаковка архива | |
+| | `ansible.builtin.get_url` | ansible-core | загрузка файла по URL | |
+| Веб и PHP | `community.general.apache2_module` | community.general | включение модулей Apache | |
+| | `community.general.composer` | community.general | команды Composer | да |
+| Проверки | `ansible.builtin.uri` | ansible-core | HTTP-запросы | да |
+| | `ansible.builtin.assert` | ansible-core | проверка условий | да |
+| Сеть | `community.general.ufw` | community.general | правила межсетевого экрана UFW | |
+
+### 8.3 Проблемы при создании плейбука и их решение
+
+Проблемы перечислены в порядке появления.
+
+**1. Первое подключение к серверу.**
+
+- Симптом: сборка #1 задания `test-server-setup`:
+
+  ```
+  09:33:39  fatal: [test-server]: UNREACHABLE! => {"changed": false, "msg": "Failed to connect to the host via ssh: Host key verification failed.", "unreachable": true}
+  09:33:39  test-server                : ok=0    changed=0    unreachable=1    failed=0    skipped=0    rescued=0    ignored=0
+  ```
+
+- Причина: `host_key_checking = True`, а в `~/.ssh/known_hosts` агента ещё не было ключа
+  `test-server`.
+- Решение: ключ занесён через `ssh-keyscan` и сверен с отпечатком на сервере (раздел 5.2, шаг 3).
+  Отключать проверку (`host_key_checking = False`) не стал: тогда подмена сервера в сети
+  осталась бы незамеченной. Сборка #2 прошла успешно.
+
+**2. Файлы проекта на сервере доступны группе на запись.**
+
+- Симптом: после первого развёртывания (сборка #1 `isbn-tools-deploy`) на сервере:
+
+  ```
+  drwxrwxr-x 5 root www-data  4096 Oct 27 09:37 .
+  -rw-rw-r-- 1 root www-data   641 Oct 27 09:36 composer.json
+  drwxrwxr-x 2 root www-data  4096 Oct 27 09:36 public
+  drwxrwxr-x 2 root www-data  4096 Oct 27 09:36 src
+  ```
+
+  Группа `www-data`, от имени которой работает Apache, могла бы изменять файлы сайта.
+
+- Причина: агент Jenkins на `ansible-agent` запускается через SSH-сессию. В Ubuntu
+  `/etc/login.defs` содержит `USERGROUPS_ENAB yes`, и pam_umask для пользователя с собственной
+  группой задаёт umask `0002`. Процесс агента наследует его:
+
+  ```
+  $ docker compose exec ansible-agent sh -c 'grep Umask /proc/$(pgrep java)/status'
+  Umask:	0002
+  $ docker compose exec ssh-agent sh -c 'grep Umask /proc/$(pgrep java)/status'
+  Umask:	0022
+  ```
+
+  git создаёт рабочую копию с правами `664/775`, а `synchronize` (rsync в режиме archive)
+  переносит их на сервер.
+
+- Решение, шаг 1: в задачу `file` добавлен `mode: "u=rwX,g=rX,o=rX"`. Права исправились, но
+  сборка #2 показала `changed=1` в обеих стадиях без изменений в проекте: rsync возвращал
+  владельца и права с агента, задача `file` возвращала их обратно, и так при каждом запуске.
+- Решение, шаг 2: в `synchronize` добавлены `owner: false`, `group: false` и
+  `--chmod=D755,F644`. Права задаются уже при копировании, задача `file` только подтверждает их.
+  Сборки #3 и #4: `changed=0`.
+
+**3. Предупреждение при копировании.**
+
+- Симптом: при каждом запуске задачи `synchronize` выводится
+  `[DEPRECATION WARNING]: The connection's stdin object is deprecated` (раздел 7.3).
+- Причина: модуль `ansible.posix.synchronize` 1.5.4 обращается к устаревшему атрибуту
+  соединения в ansible-core 2.16.3. Это предупреждение о будущей версии 2.19, на результат
+  копирования оно не влияет.
+- Решение: предупреждение оставлено видимым (`deprecation_warnings = True`). При переходе на
+  ansible-core 2.19 потребуется более новая версия коллекции `ansible.posix`.
+
+**4. Модуль synchronize не проверял ключ хоста.**
+
+- Симптом: при ручном запуске плейбука на агенте с ключом `-v` в команде rsync видны параметры,
+  отключающие проверку (сокращено):
+
+  ```
+  "cmd": "/usr/bin/rsync --delay-updates -F --compress --delete-after --archive --no-owner --no-group --rsh='/usr/bin/ssh -S none -i ... -o Port=22 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' ...
+  ```
+
+  `host_key_checking = True` в `ansible.cfg` действовал только на подключения самого Ansible,
+  а копирование файлов шло без проверки сервера.
+
+- Причина: у `ansible.posix.synchronize` параметр `verify_host` по умолчанию `false`, и модуль
+  сам добавляет эти параметры ssh.
+- Решение: в задачу добавлен `verify_host: true`. После этого в команде остаётся
+  `--rsh='/usr/bin/ssh -S none -i ... -o Port=22'`, и rsync использует `~/.ssh/known_hosts` агента.
+  Проверка с намеренно заменённым ключом `test-server` в `known_hosts`: копирование
+  завершается ошибкой, затем исходный файл восстановлен.
+
+  ```
+  @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+  Host key for test-server has changed and you have requested strict checking.
+  Host key verification failed.
+  ```
+
+  Развёртывание после исправления (сборка #7): `changed=0` в обеих стадиях.
 
 ## Остановка и очистка
 
 ```
-docker compose down       # остановка и удаление контейнеров, данные в томах сохраняются
-docker compose down -v    # то же, с удалением томов jenkins_home и jenkins_agent_volume
-docker start php_apache   # возврат сервиса lab02prep на порт 8080
+# Остановка стенда; с ключом -v удаляются и тома (настройки Jenkins, known_hosts агента).
+docker compose down
+docker compose down -v
 ```
+
+Состояние тестового сервера (Apache, PHP, сайт) хранится только в контейнере и исчезает вместе с
+ним. После `docker compose up -d` сервер восстанавливается конвейерами `test-server-setup` и
+`isbn-tools-deploy`.
