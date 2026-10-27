@@ -15,11 +15,13 @@
   tasks:
     # Тесты и служебные файлы на сервер не копируются; vendor/ исключён и поэтому не удаляется.
     # Владелец и группа не переносятся с агента, права приводятся к 755/644 при копировании.
+    # verify_host: по умолчанию модуль отключает для rsync проверку ключа хоста.
     - name: Скопировать файлы проекта на сервер
       ansible.posix.synchronize:
         src: "{{ src_dir }}"
         dest: "{{ app_root }}/"
         delete: true
+        verify_host: true
         owner: false
         group: false
         rsync_opts:
