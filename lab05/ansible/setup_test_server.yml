@@ -1,0 +1,102 @@
+---
+# Настройка тестового сервера: Apache2, PHP и виртуальный хост проекта isbn-tools.
+- name: Настроить тестовый сервер для isbn-tools
+  hosts: test_servers
+  become: true
+
+  vars:
+    app_name: isbn-tools
+    app_root: /var/www/isbn-tools
+    server_name: test-server
+    php_version: "8.3"
+
+  tasks:
+    # libapache2-mod-php: PHP в Apache; php-mbstring: нормализация ввода и Composer;
+    # composer и unzip: установка зависимостей при развёртывании; rsync: модуль synchronize.
+    - name: Установить пакеты Apache, PHP и Composer
+      ansible.builtin.apt:
+        name:
+          - apache2
+          - libapache2-mod-php
+          - php-cli
+          - php-mbstring
+          - composer
+          - unzip
+          - rsync
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Задать ServerName для всего сервера
+      ansible.builtin.copy:
+        content: "ServerName {{ server_name }}\n"
+        dest: /etc/apache2/conf-available/servername.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apache config changed
+
+    - name: Включить конфигурацию servername
+      ansible.builtin.command: a2enconf servername
+      args:
+        creates: /etc/apache2/conf-enabled/servername.conf
+      notify: apache config changed
+
+    - name: Создать каталог public проекта
+      ansible.builtin.file:
+        path: "{{ app_root }}/public"
+        state: directory
+        owner: root
+        group: www-data
+        mode: "0755"
+
+    - name: Создать виртуальный хост isbn-tools
+      ansible.builtin.template:
+        src: templates/isbn-tools.conf.j2
+        dest: /etc/apache2/sites-available/isbn-tools.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: apache config changed
+
+    - name: Включить сайт isbn-tools
+      ansible.builtin.command: a2ensite isbn-tools
+      args:
+        creates: /etc/apache2/sites-enabled/isbn-tools.conf
+      notify: apache config changed
+
+    - name: Отключить сайт по умолчанию
+      ansible.builtin.command: a2dissite 000-default
+      args:
+        removes: /etc/apache2/sites-enabled/000-default.conf
+      notify: apache config changed
+
+    # Версия PHP не передаётся в заголовке X-Powered-By.
+    - name: Отключить expose_php в php.ini модуля Apache
+      community.general.ini_file:
+        path: "/etc/php/{{ php_version }}/apache2/php.ini"
+        section: PHP
+        option: expose_php
+        value: "Off"
+        mode: "0644"
+      notify: apache config changed
+
+    # enabled не действует без systemd; после перезапуска контейнера Apache запускает сценарий запуска.
+    - name: Запустить Apache
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true
+
+  handlers:
+    # Порядок важен: сначала проверка конфигурации, затем перезагрузка.
+    - name: Проверить конфигурацию Apache
+      ansible.builtin.command: apache2ctl configtest
+      changed_when: false
+      listen: apache config changed
+
+    - name: Перезагрузить Apache
+      ansible.builtin.service:
+        name: apache2
+        state: reloaded
+      listen: apache config changed
