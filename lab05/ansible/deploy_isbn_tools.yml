@@ -36,13 +36,16 @@
         optimize_autoloader: true
       tags: configure
 
-    - name: Назначить владельца и группу файлов проекта
+    # Права задаются явно: synchronize переносит права из рабочего каталога агента,
+    # где файлы создаются с umask 0002 (запись для группы).
+    - name: Назначить владельца, группу и права файлов проекта
       ansible.builtin.file:
         path: "{{ app_root }}"
         state: directory
         recurse: true
         owner: root
         group: www-data
+        mode: "u=rwX,g=rX,o=rX"
       tags: configure
 
     - name: Запросить страницу с проверочным номером
